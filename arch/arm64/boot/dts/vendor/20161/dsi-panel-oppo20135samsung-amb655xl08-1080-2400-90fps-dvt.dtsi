@@ -19,6 +19,7 @@
 		qcom,mdss-dsi-panel-name =
 		  "samsung amb655xl08 amoled fhd+ panel";
 		qcom,mdss-dsi-panel-type = "dsi_cmd_mode";
+		qcom,mdss-dsi-panel-physical-type = "oled";
 		qcom,mdss-dsi-virtual-channel-id = <0>;
 		qcom,mdss-dsi-stream = <0>;
 		qcom,mdss-dsi-bpp = <24>;
