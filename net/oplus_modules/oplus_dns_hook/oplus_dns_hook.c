@@ -429,45 +429,33 @@ static int dns_hook_process_output(struct sk_buff *skb, int hook,
 		kfree(query_list);
 		return -1;
 	}
-
 	LOGK(0, "skb_output return package! match_count %d", match_count);
-	rsp_skb = gen_dns_rsp(skb, query_len, query_list, match_count);
-	kfree(query_list);
-	if (!rsp_skb) {
-		return -1;
-	}
+    rsp_skb = gen_dns_rsp(skb, query_len, query_list, match_count);
+    kfree(query_list);
+    if (!rsp_skb) {
+        return -1;
+    }
 
-	nf_ct_attach(rsp_skb, skb);
-	if (skb->protocol == htons(ETH_P_IP)) {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 158))
-		if (ip_route_me_harder(state->net, state->sk, rsp_skb, RTN_UNSPEC)) {
-#else
-		if (ip_route_me_harder(state->net, rsp_skb, RTN_UNSPEC)) {
-#endif
-			LOGK(1, "ip_route_me_harder error");
-			kfree_skb(rsp_skb);
-			return -1;
-		}
+    nf_ct_attach(rsp_skb, skb);
+    if (skb->protocol == htons(ETH_P_IP)) {
+        if (ip_route_me_harder(state->net, state->sk, rsp_skb, RTN_UNSPEC)) {
+            LOGK(1, "ip_route_me_harder error");
+            kfree_skb(rsp_skb);
+            return -1;
+        }
+        ret = ip_local_out(state->net, state->sk, rsp_skb);
+        LOGK(0, "ip_local_out return %d", ret);
+    } else if(skb->protocol == htons(ETH_P_IPV6)) {
+        if (ip6_route_me_harder(state->net, state->sk, rsp_skb)) {
+            LOGK(1, "ip6_route_me_harder error");
+            kfree_skb(rsp_skb);
+            return -1;
+        }
+        ret = ip6_local_out(state->net, state->sk, rsp_skb);
+        LOGK(0, "ip6_local_out return %d", ret);
+    }
 
-		ret = ip_local_out(state->net, state->sk, rsp_skb);
-		LOGK(0, "ip_local_out return %d", ret);
-	} else if (skb->protocol == htons(ETH_P_IPV6)) {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 158))
-		if (ip6_route_me_harder(state->net, state->sk, rsp_skb)) {
-#else
-		if (ip6_route_me_harder(state->net, rsp_skb)) {
-#endif
-			LOGK(1, "ip6_route_me_harder error");
-			kfree_skb(rsp_skb);
-			return -1;
-		}
-		ret = ip6_local_out(state->net, state->sk, rsp_skb);
-		LOGK(0, "ip6_local_out return %d", ret);
-	}
-
-	rsp_skb->mark |= DNS_HOOK_MARK_MASK;
-
-	return 0;
+    return 0;
 }
 
 static unsigned int oplus_dns_hook_output_hook(void *priv, struct sk_buff *skb,
