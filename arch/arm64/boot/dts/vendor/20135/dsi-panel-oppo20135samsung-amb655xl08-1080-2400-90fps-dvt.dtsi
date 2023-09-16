@@ -875,7 +875,6 @@
 };
 
 &dsi_oppo20135samsung_amb655xl08_1080_2400_cmd_dvt {
-	//oplus,apollo_backlight_enable;
 	oplus,color_vivid_status;
 	//oplus,color_srgb_status;
 	oplus,color_softiris_status;
