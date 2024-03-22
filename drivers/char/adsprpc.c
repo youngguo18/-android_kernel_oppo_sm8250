@@ -856,7 +856,7 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, uintptr_t va,
 	hlist_for_each_entry_safe(map, n, &me->maps, hn) {
 		if (map->refs == 1 && map->raddr == va &&
 			map->raddr + map->len == va + len &&
-			/* Remove map if not used in process initialization */
+			/*Remove map if not used in process initialization */
 			!map->is_filemap) {
 			match = map;
 			hlist_del_init(&map->hn);
@@ -1014,6 +1014,7 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd,
 	map->refs = 1;
 	map->fl = fl;
 	map->fd = fd;
+	map->is_filemap = false;
 	map->attr = attr;
 	map->is_filemap = false;
 	map->ctx_refs = 0;
@@ -1545,7 +1546,7 @@ static void context_free(struct smq_invoke_ctx *ctx)
 	for (i = 0; i < nbufs; ++i) {
 		if (ctx->maps[i] && ctx->maps[i]->ctx_refs)
 			ctx->maps[i]->ctx_refs--;
-		fastrpc_mmap_free(ctx->maps[i], 0);
+ 		fastrpc_mmap_free(ctx->maps[i], 0);
 	}
 	mutex_unlock(&ctx->fl->map_mutex);
 
@@ -1794,7 +1795,7 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 			for (j = bufs; j < i; j++) {
 				if (ctx->maps[j] && ctx->maps[j]->ctx_refs)
 					ctx->maps[j]->ctx_refs--;
-				fastrpc_mmap_free(ctx->maps[j], 0);
+ 				fastrpc_mmap_free(ctx->maps[j], 0);
 			}
 			mutex_unlock(&ctx->fl->map_mutex);
 			goto bail;
@@ -2094,7 +2095,7 @@ static int put_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 						0, 0, &mmap)) {
 				if (mmap && mmap->ctx_refs)
 					mmap->ctx_refs--;
-				fastrpc_mmap_free(mmap, 0);
+ 				fastrpc_mmap_free(mmap, 0);
 			}
 		}
 	}
@@ -2667,6 +2668,9 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 			if (file)
 				file->is_filemap = true;
 			mutex_unlock(&fl->map_mutex);
+			if (file) {
+				file->is_filemap = true;
+			}
 			if (err)
 				goto bail;
 		}
@@ -2675,7 +2679,7 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 		VERIFY(err, !init->mem);
 		if (err) {
 			err = -EINVAL;
-			pr_err("adsprpc: %s: %s: ERROR: donated memory allocated in userspace\n",
+			pr_err("adsprpc: %s: %s: ERROR: donated memory allocated in userspace \n",
 				current->comm, __func__);
 			goto bail;
 		}
@@ -2780,8 +2784,8 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 			inbuf.pageslen = 1;
 			mutex_lock(&fl->map_mutex);
 			err = fastrpc_mmap_create(fl, -1, 0, init->mem,
-				 init->memlen, ADSP_MMAP_REMOTE_HEAP_ADDR,
-				 &mem);
+				init->memlen, ADSP_MMAP_REMOTE_HEAP_ADDR,
+				&mem);
 			if (mem)
 				mem->is_filemap = true;
 			mutex_unlock(&fl->map_mutex);
@@ -4270,6 +4274,7 @@ static int fastrpc_set_process_info(struct fastrpc_file *fl)
 	char strpid[PID_SIZE];
 	char cur_comm[TASK_COMM_LEN];
 
+
 	memcpy(cur_comm, current->comm, TASK_COMM_LEN);
 	cur_comm[TASK_COMM_LEN-1] = '\0';
 	fl->tgid = current->tgid;
@@ -4386,7 +4391,10 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 			cpumask_set_cpu(me->silvercores.coreno[i], &mask);
 		fl->pm_qos_req.type = PM_QOS_REQ_AFFINE_CORES;
 		cpumask_copy(&fl->pm_qos_req.cpus_affine, &mask);
+<<<<<<< HEAD
 
+=======
+>>>>>>> c79d036dc02a (Synchronize code for realme RMX3366_14.0.0.150(CN01))
 		mutex_lock(&fl->pm_qos_mutex);
 		if (!fl->qos_request) {
 			pm_qos_add_request(&fl->pm_qos_req,
@@ -4395,7 +4403,10 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 		} else
 			pm_qos_update_request(&fl->pm_qos_req, latency);
 		mutex_unlock(&fl->pm_qos_mutex);
+<<<<<<< HEAD
 
+=======
+>>>>>>> c79d036dc02a (Synchronize code for realme RMX3366_14.0.0.150(CN01))
 		/* Ensure CPU feature map updated to DSP for early WakeUp */
 		fastrpc_send_cpuinfo_to_dsp(fl);
 		break;

@@ -454,6 +454,9 @@ static int do_read_inode(struct inode *inode)
 	F2FS_I(inode)->i_disk_time[1] = inode->i_ctime;
 	F2FS_I(inode)->i_disk_time[2] = inode->i_mtime;
 	F2FS_I(inode)->i_disk_time[3] = F2FS_I(inode)->i_crtime;
+#ifdef CONFIG_F2FS_APPBOOST
+	atomic_set(&F2FS_I(inode)->appboost_abort, 0);
+#endif
 	f2fs_put_page(node_page, 1);
 
 	stat_inc_inline_xattr(inode);

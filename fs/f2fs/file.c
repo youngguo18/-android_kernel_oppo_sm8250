@@ -21,6 +21,10 @@
 #include <linux/uuid.h>
 #include <linux/file.h>
 #include <linux/nls.h>
+#ifdef CONFIG_F2FS_APPBOOST
+#include <linux/delay.h>
+#include <linux/version.h>
+#endif
 
 #include "f2fs.h"
 #include "node.h"
@@ -258,6 +262,12 @@ static int f2fs_do_sync_file(struct file *file, loff_t start, loff_t end,
 	};
 	unsigned int seq_id = 0;
 
+#ifdef CONFIG_F2FS_BD_STAT
+	u64 fsync_begin = 0, fsync_end = 0, wr_file_end, cp_begin = 0,
+	    cp_end = 0, sync_node_begin = 0, sync_node_end = 0,
+	    flush_begin = 0, flush_end = 0;
+#endif
+
 	if (unlikely(f2fs_readonly(inode->i_sb)))
 		return 0;
 
@@ -275,11 +285,18 @@ static int f2fs_do_sync_file(struct file *file, loff_t start, loff_t end,
 	if (S_ISDIR(inode->i_mode))
 		goto go_write;
 
+#ifdef CONFIG_F2FS_BD_STAT
+	fsync_begin = local_clock();
+#endif
+
 	/* if fdatasync is triggered, let's do in-place-update */
 	if (datasync || get_dirty_pages(inode) <= SM_I(sbi)->min_fsync_blocks)
 		set_inode_flag(inode, FI_NEED_IPU);
 	ret = file_write_and_wait_range(file, start, end);
 	clear_inode_flag(inode, FI_NEED_IPU);
+#ifdef CONFIG_F2FS_BD_STAT
+	wr_file_end = local_clock();
+#endif
 
 	if (ret || is_sbi_flag_set(sbi, SBI_CP_DISABLED)) {
 		trace_f2fs_sync_file_exit(inode, cp_reason, datasync, ret);
@@ -318,7 +335,13 @@ go_write:
 
 	if (cp_reason) {
 		/* all the dirty node pages should be flushed for POR */
+#ifdef CONFIG_F2FS_BD_STAT
+		cp_begin = local_clock();
+#endif
 		ret = f2fs_sync_fs(inode->i_sb, 1);
+#ifdef CONFIG_F2FS_BD_STAT
+		cp_end = local_clock();
+#endif
 
 		/*
 		 * We've secured consistency through sync_fs. Following pino
@@ -330,9 +353,15 @@ go_write:
 		goto out;
 	}
 sync_nodes:
+#ifdef CONFIG_F2FS_BD_STAT
+	sync_node_begin = local_clock();
+#endif
 	atomic_inc(&sbi->wb_sync_req[NODE]);
 	ret = f2fs_fsync_node_pages(sbi, inode, &wbc, atomic, &seq_id);
 	atomic_dec(&sbi->wb_sync_req[NODE]);
+#ifdef CONFIG_F2FS_BD_STAT
+	sync_node_end = local_clock();
+#endif
 	if (ret)
 		goto out;
 
@@ -366,8 +395,24 @@ sync_nodes:
 	f2fs_remove_ino_entry(sbi, ino, APPEND_INO);
 	clear_inode_flag(inode, FI_APPEND_WRITE);
 flush_out:
+#ifdef CONFIG_OPLUS_FEATURE_OF2FS
+	/*
+	 * 2019/09/13, fsync nobarrier protection
+	 */
+	if (!atomic && (F2FS_OPTION(sbi).fsync_mode != FSYNC_MODE_NOBARRIER ||
+							sbi->fsync_protect))
+#else
 	if (!atomic && F2FS_OPTION(sbi).fsync_mode != FSYNC_MODE_NOBARRIER)
+#endif
+        {
+#ifdef CONFIG_F2FS_BD_STAT
+		flush_begin = local_clock();
+#endif
 		ret = f2fs_issue_flush(sbi, inode->i_ino);
+#ifdef CONFIG_F2FS_BD_STAT
+		flush_end = local_clock();
+#endif
+	}
 	if (!ret) {
 		f2fs_remove_ino_entry(sbi, ino, UPDATE_INO);
 		clear_inode_flag(inode, FI_UPDATE_WRITE);
@@ -379,6 +424,31 @@ out:
 	f2fs_trace_ios(NULL, 1);
 	trace_android_fs_fsync_end(inode, start, end - start);
 
+#ifdef CONFIG_F2FS_BD_STAT
+	if (!ret && fsync_begin) {
+		fsync_end = local_clock();
+		bd_lock(sbi);
+		if (S_ISREG(inode->i_mode))
+			bd_inc_val(sbi, fsync_reg_file_count, 1);
+		else if (S_ISDIR(inode->i_mode))
+			bd_inc_val(sbi, fsync_dir_count, 1);
+		bd_inc_val(sbi, fsync_time, fsync_end - fsync_begin);
+		bd_max_val(sbi, max_fsync_time, fsync_end - fsync_begin);
+		bd_inc_val(sbi, fsync_wr_file_time, wr_file_end - fsync_begin);
+		bd_max_val(sbi, max_fsync_wr_file_time, wr_file_end - fsync_begin);
+		bd_inc_val(sbi, fsync_cp_time, cp_end - cp_begin);
+		bd_max_val(sbi, max_fsync_cp_time, cp_end - cp_begin);
+		if (sync_node_end) {
+			bd_inc_val(sbi, fsync_sync_node_time,
+				   sync_node_end - sync_node_begin);
+			bd_max_val(sbi, max_fsync_sync_node_time,
+				   sync_node_end - sync_node_begin);
+		}
+		bd_inc_val(sbi, fsync_flush_time, flush_end - flush_begin);
+		bd_max_val(sbi, max_fsync_flush_time, flush_end - flush_begin);
+		bd_unlock(sbi);
+	}
+#endif
 	return ret;
 }
 
@@ -1767,11 +1837,18 @@ static long f2fs_fallocate(struct file *file, int mode,
 		ret = expand_inode_data(inode, offset, len, mode);
 	}
 
+#ifdef CONFIG_F2FS_APPBOOST
+	/* file change, update mtime */
+	inode->i_mtime = inode->i_ctime = current_time(inode);
+	f2fs_mark_inode_dirty_sync(inode, false);
+	f2fs_update_time(F2FS_I_SB(inode), REQ_TIME);
+#else
 	if (!ret) {
 		inode->i_mtime = inode->i_ctime = current_time(inode);
 		f2fs_mark_inode_dirty_sync(inode, false);
 		f2fs_update_time(F2FS_I_SB(inode), REQ_TIME);
 	}
+#endif
 
 out:
 	inode_unlock(inode);
@@ -2552,6 +2629,1218 @@ out:
 	return ret;
 }
 
+#ifdef CONFIG_F2FS_APPBOOST
+#define BOOST_MAX_FILES 1019
+#define BOOST_FILE_STATE_FINISH 1
+#define F2FS_BOOSTFILE_VERSION 0xF2F5
+#define BOOSTFILE_MAX_BITMAP (1<<20)
+#define PRELOAD_MAX_TIME	(2000)
+
+/* structure on disk */
+struct merge_summary_dinfo {
+	__le32 num;
+	__le32 version;
+	__le32 state;
+	__le32 tail;
+	__le32 checksum;
+	__le32 fsize[BOOST_MAX_FILES];
+};
+
+struct merge_extent_dinfo {
+	__le32 index;
+	__le32 length;
+	__le32 index_in_mfile;
+};
+
+struct merge_file_dinfo {
+	__le32 ino;
+	__le32 extent_count;
+	__le32 i_generation;
+	__le32 REV;
+	__le64 mtime;
+	struct merge_extent_dinfo extents[0];
+};
+
+/* inmem manage structure */
+struct merge_summary {
+	int num;
+	int version;
+	int state;
+	int tail;
+	u32 checksum;
+	int fsize[BOOST_MAX_FILES];
+};
+
+struct merge_extent {
+	unsigned index;
+	unsigned length;
+	unsigned index_in_mfile;
+};
+
+struct merge_file {
+	unsigned ino;
+	unsigned extent_count;
+	unsigned i_generation;
+	unsigned REV;
+	u64 mtime;
+	struct merge_extent extents[0];
+};
+
+/* manage structure in f2fs inode info */
+struct fi_merge_manage {
+	int num;
+	unsigned long cur_blocks;
+	struct list_head list;
+};
+
+struct file_list_node {
+	struct list_head list;
+	struct list_head ext_list;
+	u64 bitmax;
+	unsigned long *bitmap;
+	struct merge_file merge_file;
+};
+
+struct extent_list_node {
+	struct list_head list;
+	struct merge_extent extent;
+};
+
+static bool f2fs_appboost_enable(struct f2fs_sb_info *sbi)
+{
+	return sbi->appboost;
+}
+
+static unsigned int f2fs_appboost_maxblocks(struct f2fs_sb_info *sbi)
+{
+	return sbi->appboost_max_blocks;
+}
+
+static int f2fs_file_read(struct file *file, loff_t offset, unsigned char *data, unsigned int size)
+{
+	struct inode *inode = file_inode(file);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	if (time_to_inject(sbi, FAULT_READ_ERROR)) {
+		f2fs_show_injection_info(sbi, FAULT_READ_ERROR);
+		return -EIO;
+	}
+	return kernel_read(file, data, size, &offset);
+}
+
+static int f2fs_file_write(struct file *file, loff_t off, unsigned char *data, unsigned int size)
+{
+	struct inode *inode = file_inode(file);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct address_space *mapping = inode->i_mapping;
+	const struct address_space_operations *a_ops = mapping->a_ops;
+	loff_t offset = off & (PAGE_SIZE - 1);
+	size_t towrite = size;
+	struct page *page;
+	void *fsdata = NULL;
+	char *kaddr;
+	int err = 0;
+	int tocopy;
+
+	if (time_to_inject(sbi, FAULT_WRITE_ERROR)) {
+		f2fs_show_injection_info(sbi, FAULT_WRITE_ERROR);
+		return -EIO;
+	}
+	// if no set this, prepare_write_begin will return 0 directly and get the error block
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+	set_inode_flag(inode, FI_NO_PREALLOC);
+#endif
+	while (towrite > 0) {
+		tocopy = min_t(unsigned long, PAGE_SIZE - offset, towrite);
+retry:
+		err = a_ops->write_begin(NULL, mapping, off, tocopy, 0,
+								&page, &fsdata);
+		if (unlikely(err)) {
+			if (err == -ENOMEM) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+				congestion_wait(BLK_RW_ASYNC,
+							DEFAULT_IO_TIMEOUT);
+#else
+				f2fs_io_schedule_timeout(DEFAULT_IO_TIMEOUT);
+#endif
+				goto retry;
+			}
+			break;
+		}
+
+		kaddr = kmap_atomic(page);
+		memcpy(kaddr + offset, data, tocopy);
+		kunmap_atomic(kaddr);
+		flush_dcache_page(page);
+		a_ops->write_end(NULL, mapping, off, tocopy, tocopy,
+							page, fsdata);
+		offset = 0;
+		towrite -= tocopy;
+		off += tocopy;
+		data += tocopy;
+		cond_resched();
+	}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+	clear_inode_flag(inode, FI_NO_PREALLOC);
+#endif
+	if (size == towrite)
+		return err;
+
+	inode->i_mtime = inode->i_ctime = current_time(inode);
+	f2fs_mark_inode_dirty_sync(inode, false);
+
+	return size - towrite;
+}
+
+static struct fi_merge_manage *f2fs_init_merge_manage(struct inode *inode)
+{
+	struct fi_merge_manage *fmm;
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	fmm = f2fs_kmalloc(sbi, sizeof(struct fi_merge_manage), GFP_KERNEL);
+	if (!fmm) {
+		return NULL;
+	}
+
+	INIT_LIST_HEAD(&fmm->list);
+	fmm->num = 0;
+	fmm->cur_blocks = 0;
+
+	return fmm;
+}
+
+void f2fs_boostfile_free(struct inode *inode)
+{
+	struct fi_merge_manage *fmm;
+	struct file_list_node *fm_node, *fm_tmp;
+	struct extent_list_node *fm_ext_node, *fm_ext_tmp;
+	struct f2fs_inode_info *fi = F2FS_I(inode);
+
+	if (!fi->i_boostfile) {
+		return;
+	}
+
+	fmm = (struct fi_merge_manage *)fi->i_boostfile;
+	list_for_each_entry_safe(fm_node, fm_tmp, &fmm->list, list) {
+		kvfree(fm_node->bitmap);
+
+		list_for_each_entry_safe(fm_ext_node, fm_ext_tmp, &fm_node->ext_list, list) {
+			list_del(&fm_ext_node->list);
+			kfree(fm_ext_node);
+		}
+
+		list_del(&fm_node->list);
+		kfree(fm_node);
+	}
+	kfree(fmm);
+	fi->i_boostfile = NULL;
+}
+
+static struct file_list_node *f2fs_search_merge_file(struct fi_merge_manage *fmm, unsigned ino)
+{
+	struct file_list_node *fm_node, *fm_tmp;
+
+	list_for_each_entry_safe(fm_node, fm_tmp, &fmm->list, list) {
+		if (fm_node->merge_file.ino == ino) {
+			return fm_node;
+		}
+	}
+
+	return NULL;
+}
+
+static int _f2fs_insert_merge_extent(struct f2fs_sb_info* sbi,
+				     struct file_list_node *fm_node, unsigned start,
+				     unsigned end, struct fi_merge_manage *fmm, u32 max_blocks)
+{
+	struct extent_list_node *ext_node;
+	struct extent_list_node *ext_tail;
+	unsigned length;
+
+	if (fmm->cur_blocks >= max_blocks)
+		return -EOVERFLOW;
+
+	// update the end
+	if (((end - start + 1) + fmm->cur_blocks) >= max_blocks)
+		end = (max_blocks - fmm->cur_blocks) + start - 1;
+
+	length = end - start + 1;
+	ext_tail = list_last_entry(&(fm_node->ext_list), struct extent_list_node, list);
+	if (ext_tail) {
+		if (start == (ext_tail->extent.index + ext_tail->extent.length)) {
+			ext_tail->extent.length += length;
+			fmm->cur_blocks += length;
+			return 0;
+		}
+	}
+
+	ext_node = (struct extent_list_node *)f2fs_kmalloc(sbi, sizeof(struct extent_list_node), GFP_KERNEL);
+	if (!ext_node) {
+		return -ENOMEM;
+	}
+	ext_node->extent.index = start;
+	ext_node->extent.length = length;
+	ext_node->extent.index_in_mfile = 0;
+
+	INIT_LIST_HEAD(&ext_node->list);
+	list_add_tail(&(ext_node->list), &(fm_node->ext_list));
+	fm_node->merge_file.extent_count++;
+	fmm->cur_blocks += length;
+
+	trace_printk("count=%lu index=%lu length=%lu\n",
+			fm_node->merge_file.extent_count, ext_node->extent.index , ext_node->extent.length);
+
+	return 0;
+
+}
+
+static int f2fs_insert_merge_extent(struct fi_merge_manage *fmm, struct f2fs_sb_info *sbi,
+				 struct file_list_node *fm_node, struct merge_extent *fm_ext)
+{
+	unsigned low = fm_ext->index;
+	unsigned high = low + fm_ext->length - 1;
+	unsigned start = 1, end = 0;
+	unsigned i;
+	bool spliting = false;
+	int ret = 0;
+
+	if (high >= fm_node->bitmax) {
+		f2fs_warn(sbi, "f2fs_insert_merge_extent range bad value [%u,%u,%u]",
+							low, high, fm_node->bitmax);
+		return -EINVAL;
+	}
+
+	trace_printk("f2fs_insert_merge_extebt low=%lu high=%lu\n", low, high);
+	for (i = low; i <= high; i++) {
+		if (test_and_set_bit(i, fm_node->bitmap)) {
+			if (spliting) {
+				ret = _f2fs_insert_merge_extent(sbi, fm_node, start,
+						end, fmm, f2fs_appboost_maxblocks(sbi));
+				if (ret)
+					return ret;
+
+				// reset
+				spliting = false;
+				start = 1;
+				end = 0;
+			} else {
+				continue;
+			}
+		} else {
+			if (spliting) {
+				end = i;
+				continue;
+			} else {
+				start = i;
+				end = i;
+				spliting = true;
+			}
+		}
+	}
+
+	if (end >= start && spliting)
+		ret = _f2fs_insert_merge_extent(sbi, fm_node, start,
+						end, fmm, f2fs_appboost_maxblocks(sbi));
+
+	return ret;
+}
+
+static int f2fs_insert_merge_file_user(struct fi_merge_manage *fmm, struct f2fs_sb_info *sbi,
+					struct file_list_node *fm_node, struct merge_file_user *fm_u)
+{
+	int ret = 0;
+	struct merge_extent *fm_ext = NULL;
+	int i;
+
+	fm_ext = (struct merge_extent *)f2fs_kvmalloc(sbi,
+				sizeof(struct merge_extent) * fm_u->extent_count, GFP_KERNEL);
+	if (!fm_ext) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	if (copy_from_user(fm_ext, (struct merge_extent __user *)fm_u->extents,
+		sizeof(struct merge_extent) * fm_u->extent_count)) {
+		ret = -EFAULT;
+		goto fail;
+	}
+
+	for (i = 0; i < fm_u->extent_count; i++) {
+		if (fm_ext[i].length == 0) {
+			f2fs_warn(sbi, "f2fs_ioc_merge_user check ext length == 0!");
+			ret = -EINVAL;
+			goto fail;
+		}
+
+		ret = f2fs_insert_merge_extent(fmm, sbi, fm_node, &fm_ext[i]);
+		if (ret) {
+			goto fail;
+		}
+	}
+
+fail:
+	if (fm_ext)
+		kvfree(fm_ext);
+
+	return ret;
+}
+
+static int f2fs_ioc_start_file_merge(struct file *filp, unsigned long arg)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_inode_info *fi = F2FS_I(inode);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct inode *inode_source;
+	struct fi_merge_manage *fmm;
+	struct file_list_node *fm_node;
+	struct merge_file_user fm_u;
+	int ret = 0;
+	loff_t i_size;
+
+	if (f2fs_readonly(sbi->sb))
+		return -EROFS;
+
+	if  (!f2fs_appboost_enable(sbi))
+		return -ENOTTY;
+
+	if (!inode_trylock(inode))
+		return -EAGAIN;
+
+	if (!(filp->f_flags & __O_TMPFILE)) {
+		f2fs_warn(sbi, "f2fs_ioc_start_file_merge check flags failed!");
+		inode_unlock(inode);
+		return -EINVAL;
+	}
+
+	if (!fi->i_boostfile) {
+		fi->i_boostfile = f2fs_init_merge_manage(inode);
+		if (!fi->i_boostfile) {
+			f2fs_warn(sbi, "f2fs_ioc_start_file_merge init private failed!");
+			inode_unlock(inode);
+			return -ENOMEM;
+		}
+	}
+
+	fmm = fi->i_boostfile;
+	if (fmm->num >= BOOST_MAX_FILES) {
+		f2fs_warn(sbi, "f2fs_ioc_start_file_merge num overflow!");
+		ret = -EFAULT;
+		goto fail;
+	}
+
+	if (copy_from_user(&fm_u, (struct merge_file_user __user *)arg,
+		sizeof(struct merge_file_user))) {
+		ret = -EFAULT;
+		goto fail;
+	}
+
+	fm_node = f2fs_search_merge_file(fmm, fm_u.ino);
+	if (!fm_node) {
+		inode_source = f2fs_iget(sbi->sb, fm_u.ino);
+		if (IS_ERR(inode_source)) {
+			ret = PTR_ERR(inode_source);
+			f2fs_warn(sbi, "f2fs_ioc_start_file_merge no found ino=%d", fm_u.ino);
+			goto fail;
+		}
+
+		if (is_bad_inode(inode_source)) {
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+
+		i_size = i_size_read(inode_source);
+		if (DIV_ROUND_UP(i_size, PAGE_SIZE) > BOOSTFILE_MAX_BITMAP) {
+			f2fs_warn(sbi, "f2fs_ioc_start_file_merge ino=%d, i_size=%lld", fm_u.ino, i_size);
+			iput(inode_source);
+			ret = -EFAULT;
+			goto fail;
+		}
+
+		if (fm_u.mtime != timespec64_to_ns(&inode_source->i_mtime) ||
+			fm_u.i_generation != inode_source->i_generation) {
+			f2fs_warn(sbi, "f2fs_ioc_start_file_merge EKEYEXPIRED ino=%d", fm_u.ino);
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+
+		iput(inode_source);
+
+		fm_node = (struct file_list_node *)f2fs_kmalloc(sbi,
+						sizeof(struct file_list_node), GFP_KERNEL);
+		if (!fm_node) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+		fm_node->merge_file.ino = fm_u.ino;
+		fm_node->merge_file.extent_count = 0;
+		fm_node->merge_file.mtime = fm_u.mtime;
+		fm_node->merge_file.i_generation = fm_u.i_generation;
+		fm_node->bitmax = DIV_ROUND_UP(i_size, PAGE_SIZE);
+		fm_node->bitmap = (unsigned long*)f2fs_kvzalloc(sbi,
+						f2fs_bitmap_size(fm_node->bitmax), GFP_KERNEL);
+		if (!fm_node->bitmap) {
+			kfree(fm_node);
+			fm_node = NULL;
+			ret = -ENOMEM;
+			goto fail;
+		}
+
+		INIT_LIST_HEAD(&(fm_node->ext_list));
+		list_add_tail(&(fm_node->list), &(fmm->list));
+		fmm->num++;
+	} else {
+		if (fm_node->merge_file.i_generation != fm_u.i_generation ||
+			fm_node->merge_file.mtime  != fm_u.mtime) {
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+	}
+
+	ret = f2fs_insert_merge_file_user(fmm, sbi, fm_node, &fm_u);
+	// if return EOVERFLOW, we support max blocks
+	if (ret == -EOVERFLOW) {
+		trace_printk("f2fs_ioc_start_file_merge merge_blocks overflow\n");
+		ret = 0;
+	}
+
+fail:
+	inode_unlock(inode);
+	return ret;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+static void f2fs_file_read_pages(struct inode *inode)
+{
+	struct backing_dev_info *bdi;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+	DEFINE_READAHEAD(ractl, NULL, NULL, inode->i_mapping, 0);
+#else
+	DEFINE_READAHEAD(ractl, NULL, inode->i_mapping, 0);
+#endif
+	unsigned long max_blocks = (inode->i_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	unsigned long nr_to_read = 0;
+	unsigned long index = 0;
+
+	bdi = inode_to_bdi(inode);
+	if (!bdi)
+		return;
+
+	while (1) {
+		ractl._index = index;
+		/* equal to POSIX_FADV_SEQUENTIAL */
+		nr_to_read = min(2 * bdi->ra_pages, max_blocks - index + 1);
+		page_cache_ra_unbounded(&ractl, nr_to_read, 0);
+
+		index += nr_to_read;
+		if (index >= max_blocks)
+			return;
+	}
+}
+#endif
+
+static int merge_sync_file(struct f2fs_sb_info *sbi, struct file *file)
+{
+	int ret = 0;
+	struct inode *inode = file->f_mapping->host;
+
+	if (time_to_inject(sbi, FAULT_FSYNC_ERROR)) {
+		f2fs_show_injection_info(sbi, FAULT_FSYNC_ERROR);
+		ret = 0;
+	} else {
+		ret = f2fs_do_sync_file(file, 0, LLONG_MAX, 0, 0);
+	}
+
+	if (ret != 0) {
+		f2fs_err(sbi, "f2fs_end_file_merge:failed to sync");
+		return ret;
+	}
+
+	if (time_to_inject(sbi, FAULT_FLUSH_ERROR)) {
+		f2fs_show_injection_info(sbi, FAULT_FLUSH_ERROR);
+		ret = 0;
+	} else {
+		ret = f2fs_issue_flush(sbi, inode->i_ino);
+	}
+
+	if (ret != 0)
+		f2fs_err(sbi, "f2fs_end_file_merge:failed to flush");
+
+	return ret;
+}
+
+static void copy_summary_info_to_disk(struct merge_summary *summary,
+					struct merge_summary_dinfo *summary_dinfo)
+{
+	if (!summary || !summary_dinfo)
+		return;
+
+	summary_dinfo->version = cpu_to_le32(summary->version);
+	summary_dinfo->state = cpu_to_le32(summary->state);
+	summary_dinfo->tail = cpu_to_le32(summary->tail);
+	summary_dinfo->checksum = cpu_to_le32(summary->checksum);
+	summary_dinfo->num = cpu_to_le32(summary->num);
+}
+
+static void copy_file_merge_info_to_disk(struct merge_file *info, struct merge_file_dinfo *dinfo)
+{
+	if (!info || !dinfo)
+		return;
+
+	dinfo->ino = cpu_to_le32(info->ino);
+	dinfo->extent_count = cpu_to_le32(info->extent_count);
+	dinfo->i_generation = cpu_to_le32(info->i_generation);
+	dinfo->mtime = cpu_to_le64(info->mtime);
+}
+
+static void copy_extent_info_to_disk(struct merge_extent *extent,
+					struct merge_extent_dinfo *extent_dinfo)
+{
+	if (!extent || !extent_dinfo)
+		return;
+
+	extent_dinfo->index = cpu_to_le32(extent->index);
+	extent_dinfo->length = cpu_to_le32(extent->length);
+	extent_dinfo->index_in_mfile = cpu_to_le32(extent->index_in_mfile);
+}
+
+static int end_file_merge(struct file *filp, unsigned long arg)
+{
+	struct merge_summary *summary = NULL;
+	struct merge_summary_dinfo *summary_dinfo = NULL;
+	struct fi_merge_manage *fmm;
+	struct file_list_node *fm_node, *fm_tmp;
+	struct extent_list_node *fm_ext_node, *fm_ext_tmp;
+	struct merge_file *cur_merge_file;
+	struct file_list_node **merge_files_lists = NULL;
+	struct inode *inode = file_inode(filp);
+	struct f2fs_inode_info *fi = F2FS_I(inode);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct inode *inode_source;
+	struct page *page = NULL;
+	unsigned char *addr = NULL;
+	unsigned long merged_blocks = 0;
+	unsigned int max_blocks = f2fs_appboost_maxblocks(sbi);
+	struct merge_extent_dinfo extent_dinfo;
+	struct merge_file_dinfo file_dinfo;
+	loff_t offset = 0;
+	loff_t tail = 0;
+	int ret, i, k, result;
+
+	/* disk free space is not enough */
+	if (has_not_enough_free_secs(sbi, 0, max_blocks >> sbi->log_blocks_per_seg))
+		return -ENOSPC;
+
+	trace_printk("f2fs_ioc_end_file_merge enter! max_blocks=%u\n", max_blocks);
+	if (!inode_trylock(inode))
+		return -EAGAIN;
+
+	if (!(filp->f_flags & __O_TMPFILE)) {
+		f2fs_warn(sbi, "f2fs_ioc_end_file_merge check flags failed!");
+		ret = -EINVAL;
+		goto fail;
+	}
+
+	// when end and private is NULL, will return err
+	if (!fi->i_boostfile) {
+		f2fs_warn(sbi, "f2fs_ioc_end_file_merge: i_boostfile is null");
+		ret = -EFAULT;
+		goto fail;
+	}
+
+	fmm = (struct fi_merge_manage *)fi->i_boostfile;
+	merge_files_lists = (struct file_list_node **)f2fs_kvmalloc(sbi,
+				sizeof(struct file_list_node *) * fmm->num, GFP_KERNEL);
+	if (!merge_files_lists) {
+		f2fs_warn(sbi, "f2fs_ioc_end_file_merge: merge_files_lists is null");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	// 1. fill summary.
+	summary = f2fs_kzalloc(sbi, sizeof(struct merge_summary), GFP_KERNEL);
+	if (!summary) {
+		f2fs_warn(sbi, "f2fs_ioc_end_file_merge: summary is null");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	summary_dinfo = f2fs_kzalloc(sbi, sizeof(struct merge_summary_dinfo), GFP_KERNEL);
+	if (!summary_dinfo) {
+		f2fs_warn(sbi, "f2fs_ioc_end_file_merge: summary_dinfo is null");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	trace_printk("f2fs_ioc_end_file_merge fill summary num=%d,cur_blocks=%u\n",
+								fmm->num, fmm->cur_blocks);
+	list_for_each_entry_safe(fm_node, fm_tmp, &fmm->list, list) {
+		int size = fm_node->merge_file.extent_count *
+				sizeof(struct merge_extent) + sizeof(struct merge_file);
+		summary->fsize[summary->num] = size;
+		summary_dinfo->fsize[summary->num] = cpu_to_le32(size);
+		merge_files_lists[summary->num] = fm_node;
+		summary->num++;
+	}
+
+	// calc the offset
+	offset = sizeof(struct merge_summary);
+	for (i = 0; i < fmm->num; i++) {
+		offset += summary->fsize[i];
+	}
+	// align PAGE_SIZE
+	offset = (offset + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+	// write file
+	for (i = 0; i < fmm->num; i++) {
+		cur_merge_file = &(merge_files_lists[i]->merge_file);
+		inode_source = f2fs_iget(sbi->sb, cur_merge_file->ino);
+		if (IS_ERR(inode_source)) {
+			f2fs_warn(sbi, "f2fs_ioc_end_file_merge NOFOUND ino=%d", cur_merge_file->ino);
+			ret = PTR_ERR(inode_source);
+			goto fail;
+		}
+
+		if (is_bad_inode(inode_source)) {
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+
+		if (!inode_trylock(inode_source)) {
+			iput(inode_source);
+			ret = -EAGAIN;
+			goto fail;
+		}
+
+		if (!S_ISREG(inode_source->i_mode)) {
+			inode_unlock(inode_source);
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+		if (cur_merge_file->mtime != timespec64_to_ns(&inode_source->i_mtime)) {
+			f2fs_warn(sbi, "f2fs_ioc_end_file_merge mtime expired ino = %u, new_time = %llu, expired_time = %llu",
+						cur_merge_file->ino, timespec64_to_ns(&inode_source->i_mtime), cur_merge_file->mtime);
+			inode_unlock(inode_source);
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+
+		if (cur_merge_file->i_generation != inode_source->i_generation) {
+			f2fs_warn(sbi, "f2fs_ioc_end_file_merge i_generation has been changed ino = %u!",  cur_merge_file->ino);
+			inode_unlock(inode_source);
+			iput(inode_source);
+			ret = -EKEYEXPIRED;
+			goto fail;
+		}
+
+		ret = fscrypt_require_key(inode_source);
+		if (ret) {
+			f2fs_warn(sbi, "f2fs_ioc_end_file_merge get file ino = %d encrypt info failed\n", inode_source->i_ino);
+			inode_unlock(inode_source);
+			iput(inode_source);
+			goto fail;
+		}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+		f2fs_file_read_pages(inode_source);
+#endif
+		list_for_each_entry_safe(fm_ext_node, fm_ext_tmp, &merge_files_lists[i]->ext_list, list) {
+			fm_ext_node->extent.index_in_mfile = offset >> PAGE_SHIFT;
+
+			for (k = 0; k < fm_ext_node->extent.length; k++) {
+				if (time_to_inject(sbi, FAULT_PAGE_ERROR)) {
+					f2fs_show_injection_info(sbi, FAULT_PAGE_ERROR);
+					page = ERR_PTR(-EIO);
+				} else {
+					page = f2fs_get_lock_data_page(inode_source, fm_ext_node->extent.index + k, false);
+				}
+				if (IS_ERR(page)) {
+					f2fs_warn(sbi, "f2fs_find_data_page err (%d,%d) ino:%d",
+								fm_ext_node->extent.index, k, cur_merge_file->ino);
+					inode_unlock(inode_source);
+					iput(inode_source);
+					ret = -EIO;
+					goto fail;
+				}
+
+				addr = kmap(page);
+				if (f2fs_file_write(filp, offset, addr, PAGE_SIZE) != PAGE_SIZE) {
+					kunmap(page);
+					flush_dcache_page(page);
+					f2fs_put_page(page, 1);
+					inode_unlock(inode_source);
+					iput(inode_source);
+					ret = -EIO;
+					goto fail;
+				}
+				kunmap(page);
+				flush_dcache_page(page);
+				trace_printk("f2fs_ioc_end_file_merge write ino = %u, index_in_mfile = %u, index = %u, checksum = %u\n",
+								cur_merge_file->ino, fm_ext_node->extent.index_in_mfile, fm_ext_node->extent.index,
+								f2fs_crc32(sbi, (void*)addr, PAGE_SIZE));
+				offset += PAGE_SIZE;
+				merged_blocks++;
+				f2fs_put_page(page, 1);
+				if (merged_blocks > max_blocks) {
+					f2fs_warn(sbi, "f2fs_ioc_end_file_merge excess max_blocks %lu,%lu!!!",
+							merged_blocks, max_blocks);
+					inode_unlock(inode_source);
+					iput(inode_source);
+					ret = -EFAULT;
+					goto fail;
+				}
+
+				if (fatal_signal_pending(current)) {
+					inode_unlock(inode_source);
+					iput(inode_source);
+					ret = -EINTR;
+					goto fail;
+				}
+
+				if (!f2fs_appboost_enable(sbi)) {
+					inode_unlock(inode_source);
+					iput(inode_source);
+					ret = -ENOTTY;
+					goto fail;
+				}
+			}
+		}
+		/* invalidate clean page */
+		invalidate_mapping_pages(inode_source->i_mapping, 0, -1);
+		inode_unlock(inode_source);
+		iput(inode_source);
+	}
+
+	tail = offset;
+
+	// first write summary
+	offset = 0;
+	summary->version = F2FS_BOOSTFILE_VERSION;
+	summary->state = BOOST_FILE_STATE_FINISH;
+	summary->tail = tail;
+	summary->checksum = 0;
+	summary->checksum = f2fs_crc32(sbi, (void *)summary , sizeof(struct merge_summary));
+
+	copy_summary_info_to_disk(summary, summary_dinfo);
+	result = f2fs_file_write(filp, offset, (unsigned char *)summary_dinfo,
+				 sizeof(struct merge_summary_dinfo));
+	if (result != sizeof(struct merge_summary_dinfo)) {
+		ret = -EIO;
+		goto fail;
+	}
+
+	trace_printk("f2fs_ioc_end_file_merge write summary size:%d. offset:%d tail:%d, checksum:%u\n",
+			  sizeof(struct merge_summary), offset, summary->tail, summary->checksum);
+
+	// write the file info
+	offset = sizeof(struct merge_summary_dinfo);
+	for (i = 0; i < fmm->num; i++) {
+		copy_file_merge_info_to_disk(&(merge_files_lists[i]->merge_file), &file_dinfo);
+		result = f2fs_file_write(filp, offset, (unsigned char *)&(file_dinfo),
+					 sizeof(file_dinfo));
+		if (result != sizeof(file_dinfo)) {
+			ret = -EIO;
+			goto fail;
+		}
+		offset += sizeof(file_dinfo);
+
+		list_for_each_entry_safe(fm_ext_node, fm_ext_tmp, &merge_files_lists[i]->ext_list, list) {
+			copy_extent_info_to_disk(&fm_ext_node->extent, &extent_dinfo);
+			result = f2fs_file_write(filp, offset, (unsigned char *)&extent_dinfo, sizeof(extent_dinfo));
+			if (result != sizeof(extent_dinfo)) {
+				ret = -EIO;
+				goto fail;
+			}
+			offset += sizeof(extent_dinfo);
+
+			if (fatal_signal_pending(current)) {
+				ret = -EINTR;
+				goto fail;
+			}
+
+			if (!f2fs_appboost_enable(sbi)) {
+				ret = -ENOTTY;
+				goto fail;
+			}
+		}
+	}
+
+	ret = merge_sync_file(sbi, filp);
+	if (ret)
+		goto fail;
+
+	offset = tail;
+	if (time_to_inject(sbi, FAULT_WRITE_TAIL_ERROR)) {
+		f2fs_show_injection_info(sbi, FAULT_WRITE_TAIL_ERROR);
+		summary->checksum = F2FS_BOOSTFILE_VERSION;
+	}
+	result = f2fs_file_write(filp, offset, (unsigned char *)summary_dinfo,
+				 sizeof(struct merge_summary_dinfo));
+	if (result != sizeof(struct merge_summary_dinfo)) {
+		ret = -EIO;
+		goto fail;
+	}
+
+	ret = merge_sync_file(sbi, filp);
+fail:
+	trace_printk("f2fs_ioc_end_file_merge ret:%d, size:%d\n", ret, inode->i_size);
+	f2fs_boostfile_free(inode);
+	inode_unlock(inode);
+	if (merge_files_lists)
+		kvfree(merge_files_lists);
+	if (summary)
+		kfree(summary);
+	if (summary_dinfo)
+		kfree(summary_dinfo);
+
+	return ret;
+}
+
+static int f2fs_ioc_end_file_merge(struct file *filp, unsigned long arg)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	int ret;
+
+	if (f2fs_readonly(sbi->sb))
+		return -EROFS;
+
+	if  (!f2fs_appboost_enable(sbi))
+		return -ENOTTY;
+
+	ret = mnt_want_write_file(filp);
+	if (ret)
+		return ret;
+
+	ret = end_file_merge(filp, arg);
+
+	mnt_drop_write_file(filp);
+
+	return ret;
+}
+
+static inline bool appboost_should_abort(struct inode *inode,
+					 unsigned long boost_start, unsigned int interval)
+{
+	if (time_after(jiffies, boost_start + interval))
+		return true;
+
+	if (atomic_read(&(F2FS_I(inode)->appboost_abort))) {
+		atomic_set(&(F2FS_I(inode)->appboost_abort), 0);
+		return true;
+	}
+
+	return false;
+}
+
+static int f2fs_ioc_abort_preload_file(struct file *filp, unsigned long arg)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+
+	if (!f2fs_appboost_enable(sbi))
+		return -ENOTTY;
+
+	atomic_set(&(F2FS_I(inode)->appboost_abort), 1);
+
+	return 0;
+}
+
+static void copy_summary_info_from_disk(struct merge_summary *summary, 
+					struct merge_summary_dinfo *summary_dinfo)
+{
+	int i;
+
+	if (!summary || !summary_dinfo)
+		return;
+
+	summary->num = le32_to_cpu(summary_dinfo->num);
+	summary->version = le32_to_cpu(summary_dinfo->version);
+	summary->state = le32_to_cpu(summary_dinfo->state);
+	summary->tail = le32_to_cpu(summary_dinfo->tail);
+	summary->checksum = le32_to_cpu(summary_dinfo->checksum);
+
+	for (i = 0; i < summary->num; i++)
+		summary->fsize[i] = le32_to_cpu(summary_dinfo->fsize[i]);
+}
+
+static void copy_extent_info_from_disk(struct merge_extent *extent,
+					struct merge_extent_dinfo *d_extent)
+{
+	if (!extent || !d_extent)
+		return;
+
+	extent->index = le32_to_cpu(d_extent->index);
+	extent->length = le32_to_cpu(d_extent->length);
+	extent->index_in_mfile = le32_to_cpu(d_extent->index_in_mfile);
+}
+
+static void copy_file_merge_info_from_disk(struct merge_file *info, struct merge_file_dinfo *dinfo)
+{
+	if (!info || !dinfo)
+		return;
+
+	info->ino = le32_to_cpu(dinfo->ino);
+	info->extent_count = le32_to_cpu(dinfo->extent_count);
+	info->i_generation = le32_to_cpu(dinfo->i_generation);
+	info->mtime = le64_to_cpu(dinfo->mtime);
+}
+
+static int f2fs_ioc_preload_file(struct file *filp, unsigned long arg)
+{
+	struct inode *inode = file_inode(filp);
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct inode *inode_source = NULL;
+	struct merge_summary *summary = NULL;
+	struct merge_summary_dinfo *summary_dinfo = NULL;
+	unsigned char *page_addr = NULL;
+	struct page *page = NULL;
+	unsigned char *buf = NULL;
+	unsigned long boost_start = jiffies;
+	/* arg indicate ms to run */
+	unsigned long interval, interval_ms;
+	loff_t pos = 0;
+	loff_t tail = 0;
+	long long pos_in = 0;
+	unsigned long to_read = 0;
+	int ret = 0;
+	int i, j, k;
+	int checksum = 0;
+
+	if (!f2fs_appboost_enable(sbi))
+		return -ENOTTY;
+
+	if (get_user(interval_ms, (unsigned long __user *)arg))
+		return -EFAULT;
+
+	if (interval_ms > PRELOAD_MAX_TIME)
+		interval = PRELOAD_MAX_TIME * HZ / 1000;
+	else
+		interval = interval_ms * HZ / 1000;
+
+	if (!inode_trylock(inode))
+		return -EAGAIN;
+
+	if (atomic_read(&(F2FS_I(inode)->appboost_abort))) {
+		atomic_set(&(F2FS_I(inode)->appboost_abort), 0);
+		ret = -EAGAIN;
+		goto fail;
+	}
+
+	//check head summary
+	summary = f2fs_kzalloc(sbi, sizeof(struct merge_summary), GFP_KERNEL);
+	if (!summary) {
+		f2fs_err(sbi, "f2fs_ioc_preload_file: summary is null\n");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	summary_dinfo = f2fs_kzalloc(sbi, sizeof(struct merge_summary_dinfo), GFP_KERNEL);
+	if (!summary_dinfo) {
+		f2fs_err(sbi, "f2fs_ioc_preload_file: summary_dinfo is null\n");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	to_read = sizeof(struct merge_summary_dinfo);
+	if (f2fs_file_read(filp, 0, (unsigned char*)summary_dinfo, to_read) != to_read) {
+		ret = -EIO;
+		goto fail;
+	}
+
+	copy_summary_info_from_disk(summary, summary_dinfo);
+
+	checksum = summary->checksum;
+	summary->checksum = 0;
+	if (!f2fs_crc_valid(sbi, checksum, summary, sizeof(struct merge_summary))) {
+		ret = -EKEYEXPIRED;
+		goto fail;
+	}
+
+	if (summary->version != F2FS_BOOSTFILE_VERSION) {
+		f2fs_err(sbi, "f2fs_ioc_preload_file boost file version mismatch!\n");
+		ret = -EKEYEXPIRED;
+		goto fail;
+	}
+
+	if (summary->state != BOOST_FILE_STATE_FINISH) {
+		f2fs_err(sbi, "f2fs_ioc_preload_file boost file not ready!\n");
+		ret = -EKEYEXPIRED;
+		goto fail;
+	}
+
+	//check tail summary
+	tail = summary->tail;
+	to_read = sizeof(struct merge_summary);
+	if (f2fs_file_read(filp, tail, (unsigned char*)summary, to_read) != to_read) {
+		ret = -EIO;
+		goto fail;
+	}
+
+	if (checksum != summary->checksum) {
+		ret = -EKEYEXPIRED;
+		goto fail;
+	}
+
+	summary->checksum = 0;
+	if (!f2fs_crc_valid(sbi, checksum, summary, sizeof(struct merge_summary))) {
+		ret = -EKEYEXPIRED;
+		goto fail;
+	}
+
+	pos += sizeof(struct merge_summary);
+	for (i = 0; i < summary->num; i++) {
+		pos += summary->fsize[i];
+	}
+
+	buf = f2fs_kvmalloc(sbi, pos - sizeof(struct merge_summary), GFP_KERNEL);
+	if (!buf) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	to_read = pos - sizeof(struct merge_summary_dinfo);
+	if (f2fs_file_read(filp, sizeof(struct merge_summary), buf, to_read) != to_read) {
+		f2fs_err(sbi, "f2fs_ioc_preload_file read buf failed!\n");
+                ret = -EIO;
+		goto fail;
+	}
+
+	// align the pos
+	pos = (pos + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+	for (i = 0; i < summary->num; i++) {
+		struct merge_file merge_file;
+		struct merge_file_dinfo *merge_file_dinfo = (struct merge_file_dinfo *)(buf + pos_in);
+		copy_file_merge_info_from_disk(&merge_file, merge_file_dinfo);
+		pos_in += summary->fsize[i];
+		inode_source = f2fs_iget(sbi->sb, merge_file.ino);
+		if (IS_ERR(inode_source)) {
+			f2fs_err(sbi, "f2fs_ioc_preload_file no found!\n");
+			ret = -EFAULT;
+			goto fail;
+		}
+
+		if (is_bad_inode(inode_source)) {
+			ret = -EKEYEXPIRED;
+			goto fail_iput_source;
+		}
+
+		if (!S_ISREG(inode_source->i_mode)) {
+			ret = -EKEYEXPIRED;
+			goto fail_iput_source;
+		}
+
+		if (!inode_trylock(inode_source)) {
+			ret = -EAGAIN;
+			goto fail_iput_source;
+		}
+
+		if (merge_file.mtime != timespec64_to_ns(&inode_source->i_mtime)) {
+			f2fs_warn(sbi, "f2fs_ioc_preload_file file_merge has been changed! ino = %u, source_time = %llu, merge_time = %llu\n",
+								merge_file.ino, timespec64_to_ns(&inode_source->i_mtime), merge_file.mtime);
+			ret = -EKEYEXPIRED;
+			goto fail_unlock_source;
+		}
+
+		if (merge_file.i_generation != inode_source->i_generation) {
+                        f2fs_warn(sbi, "f2fs_ioc_preload_file i_generation has been changed!");
+			ret = -EKEYEXPIRED;
+			goto fail_unlock_source;
+		}
+
+		ret = fscrypt_require_key(inode_source);
+		if (ret) {
+			f2fs_warn(sbi, "f2fs_ioc_preload_file get file ino = %d encrypt info failed\n", inode_source->i_ino);
+			goto fail_unlock_source;
+		}
+
+		for (j = 0; j < merge_file.extent_count; j++) {
+			struct merge_extent extent;
+			copy_extent_info_from_disk(&extent, &(merge_file_dinfo->extents[j]));
+			if (pos >> PAGE_SHIFT != extent.index_in_mfile) {
+				f2fs_err(sbi, "f2fs_ioc_preload_file invalid index in merge file\n");
+				ret = -EKEYEXPIRED;
+				goto fail_unlock_source;
+			}
+
+			for (k = 0; k < extent.length; k++, pos += PAGE_SIZE) {
+				if (time_to_inject(sbi, FAULT_PAGE_ERROR)) {
+					f2fs_show_injection_info(sbi, FAULT_PAGE_ERROR);
+					page = NULL;
+				} else {
+					page = f2fs_pagecache_get_page(inode_source->i_mapping, extent.index + k,
+								FGP_LOCK | FGP_CREAT, GFP_NOFS);
+				}
+				if (!page) {
+					f2fs_warn(sbi, "f2fs_ioc_preload_file can not get page cache!\n");
+					ret = -ENOMEM;
+					goto fail_unlock_source;
+				}
+
+				if (PageUptodate(page)) {
+					f2fs_put_page(page, 1);
+					continue;
+				}
+				page_addr = kmap(page);
+				if (f2fs_file_read(filp, pos, page_addr, PAGE_SIZE) != PAGE_SIZE) {
+					kunmap(page);
+					flush_dcache_page(page);
+					f2fs_put_page(page, 1);
+					ret = -EIO;
+					goto fail_unlock_source;
+				}
+				trace_printk("f2fs_ioc_preload_file preload ino = %u, index_in_mfile = %u, index = %u, pos = %llu, checksum = %u\n",
+						merge_file.ino, extent.index_in_mfile, page->index,
+						pos, f2fs_crc32(sbi, (void*)page_addr, PAGE_SIZE));
+				kunmap(page);
+				flush_dcache_page(page);
+				SetPageUptodate(page);
+				f2fs_put_page(page, 1);
+
+				if (appboost_should_abort(inode, boost_start, interval)) {
+					ret = -EINTR;
+					f2fs_err(sbi, "f2fs_ioc_preload_file failed timeout!\n");
+					goto fail_unlock_source;
+				}
+
+				if (fatal_signal_pending(current)) {
+					ret = -EINTR;
+					goto fail_unlock_source;
+				}
+
+				if (!f2fs_appboost_enable(sbi)) {
+					ret = -ENOTTY;
+					goto fail_unlock_source;
+				}
+			}
+		}
+		inode_unlock(inode_source);
+		iput(inode_source);
+	}
+fail_unlock_source:
+	if (ret)
+		inode_unlock(inode_source);
+fail_iput_source:
+	if (ret)
+		iput(inode_source);
+fail:
+	atomic_set(&(F2FS_I(inode)->appboost_abort), 0);
+	/* invalidate boostfile clean page */
+	invalidate_mapping_pages(inode->i_mapping, 0, -1);
+	inode_unlock(inode);
+	if (buf)
+		kvfree(buf);
+	if (summary)
+		kfree(summary);
+	if (summary_dinfo)
+		kfree(summary_dinfo);
+	return ret;
+}
+#endif
+
 static int f2fs_ioc_write_checkpoint(struct file *filp, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
@@ -2595,16 +3884,19 @@ static int f2fs_defragment_range(struct f2fs_sb_info *sbi,
 	bool fragmented = false;
 	int err;
 
-	/* if in-place-update policy is enabled, don't waste time here */
-	if (f2fs_should_update_inplace(inode, NULL))
-		return -EINVAL;
-
 	pg_start = range->start >> PAGE_SHIFT;
 	pg_end = (range->start + range->len) >> PAGE_SHIFT;
 
 	f2fs_balance_fs(sbi, true);
 
 	inode_lock(inode);
+
+	/* if in-place-update policy is enabled, don't waste time here */
+	set_inode_flag(inode, FI_OPU_WRITE);
+	if (f2fs_should_update_inplace(inode, NULL)) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	/* writeback all dirty pages in the range */
 	err = filemap_write_and_wait_range(inode->i_mapping, range->start,
@@ -2687,7 +3979,7 @@ do_map:
 			goto check;
 		}
 
-		set_inode_flag(inode, FI_DO_DEFRAG);
+		set_inode_flag(inode, FI_SKIP_WRITES);
 
 		idx = map.m_lblk;
 		while (idx < map.m_lblk + map.m_len && cnt < blk_per_seg) {
@@ -2712,15 +4004,16 @@ check:
 		if (map.m_lblk < pg_end && cnt < blk_per_seg)
 			goto do_map;
 
-		clear_inode_flag(inode, FI_DO_DEFRAG);
+		clear_inode_flag(inode, FI_SKIP_WRITES);
 
 		err = filemap_fdatawrite(inode->i_mapping);
 		if (err)
 			goto out;
 	}
 clear_out:
-	clear_inode_flag(inode, FI_DO_DEFRAG);
+	clear_inode_flag(inode, FI_SKIP_WRITES);
 out:
+	clear_inode_flag(inode, FI_OPU_WRITE);
 	inode_unlock(inode);
 	if (!err)
 		range->len = (u64)total << PAGE_SHIFT;
@@ -2877,6 +4170,17 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 		up_write(&F2FS_I(dst)->i_gc_rwsem[WRITE]);
 out_src:
 	up_write(&F2FS_I(src)->i_gc_rwsem[WRITE]);
+
+#ifdef CONFIG_F2FS_APPBOOST
+	src->i_mtime = src->i_ctime = current_time(src);
+	f2fs_mark_inode_dirty_sync(src, false);
+	if (src != dst) {
+		dst->i_mtime = dst->i_ctime = current_time(dst);
+		f2fs_mark_inode_dirty_sync(dst, false);
+	}
+	f2fs_update_time(sbi, REQ_TIME);
+#endif
+
 out_unlock:
 	if (src != dst)
 		inode_unlock(dst);
@@ -3859,6 +5163,16 @@ long f2fs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return f2fs_release_compress_blocks(filp, arg);
 	case F2FS_IOC_RESERVE_COMPRESS_BLOCKS:
 		return f2fs_reserve_compress_blocks(filp, arg);
+#ifdef CONFIG_F2FS_APPBOOST
+	case F2FS_IOC_START_MERGE_FILE:
+		return f2fs_ioc_start_file_merge(filp, arg);
+	case F2FS_IOC_END_MERGE_FILE:
+		return f2fs_ioc_end_file_merge(filp, arg);
+	case F2FS_IOC_PRELOAD_FILE:
+		return f2fs_ioc_preload_file(filp, arg);
+	case F2FS_IOC_ABORT_PRELOAD_FILE:
+		return f2fs_ioc_abort_preload_file(filp, arg);
+#endif
 	default:
 		return -ENOTTY;
 	}
@@ -3868,11 +5182,32 @@ static ssize_t f2fs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
+	const loff_t pos = iocb->ki_pos;
 	int ret;
 
 	if (!f2fs_is_compress_backend_ready(inode))
 		return -EOPNOTSUPP;
 
+	if (trace_f2fs_dataread_start_enabled()) {
+		char *p = f2fs_kmalloc(F2FS_I_SB(inode), PATH_MAX, GFP_KERNEL);
+		char *path;
+		if (!p)
+			goto skip_read_trace;
+#ifdef CONFIG_F2FS_APPBOOST
+		p = strcpy(p, "/data");
+		path = dentry_path_raw(file_dentry(iocb->ki_filp), p + 5, PATH_MAX - 5);
+#else
+		path = dentry_path_raw(file_dentry(iocb->ki_filp), p, PATH_MAX);
+#endif
+		if (IS_ERR(path)) {
+			kfree(p);
+			goto skip_read_trace;
+		}
+		trace_f2fs_dataread_start(inode, pos, iov_iter_count(iter),
+					current->pid, path, current->comm);
+		kfree(p);
+	}
+skip_read_trace:
 	ret = generic_file_read_iter(iocb, iter);
 
 	if (ret > 0)
@@ -3947,6 +5282,12 @@ static ssize_t f2fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			if (!f2fs_force_buffered_io(inode, iocb, from) &&
 					allow_outplace_dio(inode, iocb, from))
 				goto write;
+
+#ifdef CONFIG_HYBRIDSWAP_CORE
+			if (f2fs_overwrite_io(inode, iocb->ki_pos,
+						iov_iter_count(from)))
+				goto write;
+#endif
 		}
 		preallocated = true;
 		target_size = iocb->ki_pos + iov_iter_count(from);
@@ -4027,6 +5368,12 @@ long f2fs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case F2FS_IOC_GET_COMPRESS_BLOCKS:
 	case F2FS_IOC_RELEASE_COMPRESS_BLOCKS:
 	case F2FS_IOC_RESERVE_COMPRESS_BLOCKS:
+#ifdef CONFIG_F2FS_APPBOOST
+	case F2FS_IOC_START_MERGE_FILE:
+	case F2FS_IOC_END_MERGE_FILE:
+	case F2FS_IOC_PRELOAD_FILE:
+	case F2FS_IOC_ABORT_PRELOAD_FILE:
+#endif
 		break;
 	default:
 		return -ENOIOCTLCMD;
