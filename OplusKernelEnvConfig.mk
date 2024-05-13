@@ -1,4 +1,4 @@
-# Copyright (C), 2008-2030, OPPO Mobile Comm Corp., Ltd
+# Copyright (C), 2008-2030, OPLUS Mobile Comm Corp., Ltd
 ### All rights reserved.
 ###
 ### File: - OplusKernelEnvConfig.mk
@@ -106,7 +106,6 @@ OPLUS_ARCH_INJECT \
 OPLUS_ARCH_EXTENDS \
 OPLUS_FEATURE_AUDIODETECT \
 VENDOR_EDIT \
-COLOROS_EDIT \
 OPLUS_FEATURE_DC \
 OPLUS_FEATURE_POWERINFO_STANDBY \
 OPLUS_FEATURE_POWERINFO_RPMH \
@@ -131,18 +130,15 @@ OPLUS_FEATURE_SIGKILL_DIAGNOSIS \
 OPLUS_FEATURE_SENSOR
 
 ifeq ($(OPLUS_FEATURE_ADFR_KERNEL), yes)
-    $(warning add OPLUS_FEATURE_ADFR in kernel)
     ALLOWED_MCROS += OPLUS_FEATURE_ADFR
 endif
 
 ifeq ($(OPLUS_FEATURE_GAMMA_SWITCH_KERNEL), yes)
-     $(warning add OPLUS_FEATURE_GAMMA_SWITCH_KERNEL in kernel)
      ALLOWED_MCROS += OPLUS_FEATURE_GAMMA_SWITCH
 endif
 
 
 $(foreach myfeature,$(ALLOWED_MCROS),\
-         $(warning make $(myfeature) to be a macro here) \
          $(eval KBUILD_CFLAGS += -D$(myfeature)) \
          $(eval KBUILD_CPPFLAGS += -D$(myfeature)) \
          $(eval CFLAGS_KERNEL += -D$(myfeature)) \
@@ -179,6 +175,58 @@ endif
 
 ifeq ($(OPLUS_FEATURE_SECURE_KEYINTERFACESGUARD),yes)
 KBUILD_CFLAGS += -DOPLUS_DISALLOW_KEY_INTERFACES
+endif
+
+ifeq ($(OPLUS_FEATURE_WIFI_LUCKYMONEY),yes)
+export OPLUS_FEATURE_WIFI_LUCKYMONEY=y
+endif
+
+ifeq ($(OPLUS_FEATURE_DHCP),yes)
+export OPLUS_FEATURE_DHCP=y
+endif
+
+ifeq ($(OPLUS_FEATURE_WIFI_CAP_CENTER),yes)
+export OPLUS_FEATURE_WIFI_CAP_CENTER=y
+endif
+
+ifeq ($(OPLUS_FEATURE_WIFI_ROUTERBOOST),yes)
+export OPLUS_FEATURE_WIFI_ROUTERBOOST=y
+endif
+
+ifeq ($(OPLUS_FEATURE_UFS_SHOW_LATENCY),yes)
+export OPLUS_FEATURE_UFS_SHOW_LATENCY=y
+endif
+
+ifeq ($(OPLUS_FEATURE_PADL_STATISTICS),yes)
+export OPLUS_FEATURE_PADL_STATISTICS=y
+endif
+
+ifeq ($(OPLUS_FEATURE_UFSPLUS),yes)
+export OPLUS_FEATURE_UFSPLUS=y
+endif
+
+ifeq ($(CONFIG_OPLUS_FEATURE_SAUPWK),yes)
+export CONFIG_OPLUS_FEATURE_SAUPWK=y
+endif
+
+ifeq ($(OPLUS_FEATURE_MEMLEAK_DETECT),yes)
+export OPLUS_FEATURE_MEMLEAK_DETECT=yes
+endif
+
+ifeq ($(OPLUS_FEATURE_PROCESS_RECLAIM),yes)
+export OPLUS_FEATURE_PROCESS_RECLAIM=yes
+endif
+
+ifeq ($(OPLUS_FEATURE_ADFR_KERNEL),yes)
+export OPLUS_FEATURE_ADFR_KERNEL=yes
+endif
+
+ifeq ($(OPLUS_FEATURE_ADFR_KERNEL),yes)
+export OPLUS_FEATURE_ADFR_KERNEL=yes
+endif
+
+ifeq ($(OPLUS_FEATURE_PXLW_IRIS5),yes)
+export OPLUS_FEATURE_PXLW_IRIS5=yes
 endif
 
 ifeq ($(OPLUS_FEATURE_AOD_RAMLESS),yes)
