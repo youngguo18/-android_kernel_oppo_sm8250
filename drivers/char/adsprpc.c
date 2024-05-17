@@ -4391,10 +4391,6 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 			cpumask_set_cpu(me->silvercores.coreno[i], &mask);
 		fl->pm_qos_req.type = PM_QOS_REQ_AFFINE_CORES;
 		cpumask_copy(&fl->pm_qos_req.cpus_affine, &mask);
-<<<<<<< HEAD
-
-=======
->>>>>>> c79d036dc02a (Synchronize code for realme RMX3366_14.0.0.150(CN01))
 		mutex_lock(&fl->pm_qos_mutex);
 		if (!fl->qos_request) {
 			pm_qos_add_request(&fl->pm_qos_req,
@@ -4403,10 +4399,6 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 		} else
 			pm_qos_update_request(&fl->pm_qos_req, latency);
 		mutex_unlock(&fl->pm_qos_mutex);
-<<<<<<< HEAD
-
-=======
->>>>>>> c79d036dc02a (Synchronize code for realme RMX3366_14.0.0.150(CN01))
 		/* Ensure CPU feature map updated to DSP for early WakeUp */
 		fastrpc_send_cpuinfo_to_dsp(fl);
 		break;
