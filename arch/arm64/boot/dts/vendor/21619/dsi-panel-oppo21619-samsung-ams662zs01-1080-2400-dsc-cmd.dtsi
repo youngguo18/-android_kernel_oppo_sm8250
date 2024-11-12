@@ -69,7 +69,7 @@
 				qcom,mdss-dsi-h-right-border = <0>;
 				qcom,mdss-dsi-v-top-border = <0>;
 				qcom,mdss-dsi-v-bottom-border = <0>;
-				qcom,mdss-dsi-panel-jitter = <0x4 0x1>;
+				qcom,mdss-dsi-panel-jitter = <0x8 0xa>;
 
 				oplus,fod-on-vblank = <0>;
 				oplus,fod-off-vblank = <1>;
