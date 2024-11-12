@@ -448,6 +448,11 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -Werror=return-type -Wno-format-security \
 		   -Wno-address-of-packed-member \
 		   -std=gnu89
+
+KBUILD_CFLAGS	+= -mcpu=cortex-a77 -mtune=cortex-a77
+KBUILD_AFLAGS   += -mcpu=cortex-a77 -mtune=cortex-a77
+KBUILD_LDFLAGS  += -mllvm -mcpu=cortex-a77 -mtune=cortex-a77
+
 KBUILD_CPPFLAGS := -D__KERNEL__
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
