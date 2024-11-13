@@ -220,7 +220,7 @@ int oplus_cam_eeprom_read_memory(struct cam_eeprom_ctrl_t *e_ctrl,
 				break;
 			else
 				read_size=32;
-				rc=EEPROM_FlashMultiRead(e_ctrl,USER_MAT,emap[j].mem.addr+i*32,data,read_size);
+			rc=EEPROM_FlashMultiRead(e_ctrl,USER_MAT,emap[j].mem.addr+i*32,data,read_size);
 			if(rc!=0){
 				CAM_ERR(CAM_EEPROM, "read failed rc=%d ",rc);
 				return rc;
