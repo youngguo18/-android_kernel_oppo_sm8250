@@ -111,20 +111,6 @@
 /* The target supports ringbuffer level APRIV */
 #define ADRENO_APRIV BIT(21)
 /*
- * Use SHMEM for page allocation. There will be no support
- * for pools and higher order pages.
- */
-#define ADRENO_USE_SHMEM BIT(22)
-/*
- * Make pages available for reclaim. Process foreground/background
- * activity is known through sysfs exposed per process. Based on
- * this, pages are unpinned and made available to Per Process
- * Reclaim (PPR). SHMEM is used for allocation of pages and
- * support for pools is removed.
- */
-#define ADRENO_PROCESS_RECLAIM BIT(23)
-
-/*
  * Adreno GPU quirks - control bits for various workarounds
  */
 
@@ -806,7 +792,7 @@ struct adreno_coresight_attr {
 	struct adreno_coresight_register *reg;
 };
 
-#if IS_ENABLED(CONFIG_CORESIGHT_ADRENO)
+#if IS_ENABLED(CONFIG_CORESIGHT_ARDENO)
 ssize_t adreno_coresight_show_register(struct device *device,
 		struct device_attribute *attr, char *buf);
 
@@ -1096,7 +1082,7 @@ void adreno_fault_skipcmd_detached(struct adreno_device *adreno_dev,
 					 struct adreno_context *drawctxt,
 					 struct kgsl_drawobj *drawobj);
 
-#if IS_ENABLED(CONFIG_CORESIGHT_ADRENO)
+#if IS_ENABLED(CONFIG_CORESIGHT_ARDENO)
 int adreno_coresight_init(struct adreno_device *adreno_dev);
 
 void adreno_coresight_start(struct adreno_device *adreno_dev);

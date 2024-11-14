@@ -11,9 +11,11 @@
 #include <linux/fdtable.h>
 #include <linux/io.h>
 #include <linux/ion.h>
+#include <linux/governor_msm_adreno_tz.h>
 #include <linux/mman.h>
 #include <linux/module.h>
 #include <linux/msm-bus.h>
+#include <linux/msm_adreno_devfreq.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/pm_runtime.h>
@@ -62,6 +64,7 @@ struct dmabuf_list_entry {
 };
 
 struct kgsl_dma_buf_meta {
+	struct kgsl_device *device;
 	struct kgsl_mem_entry *entry;
 	struct dma_buf_attachment *attach;
 	struct dma_buf *dmabuf;
@@ -273,6 +276,8 @@ static void add_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 		list_add(&dle->node, &kgsl_dmabuf_list);
 		meta->dle = dle;
 		list_add(&meta->node, &dle->dmabuf_list);
+		kgsl_trace_gpu_mem_total(meta->device,
+				 meta->entry->memdesc.size);
 	}
 	spin_unlock(&kgsl_dmabuf_lock);
 }
@@ -289,6 +294,8 @@ static void remove_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 	if (list_empty(&dle->dmabuf_list)) {
 		list_del(&dle->node);
 		kfree(dle);
+		kgsl_trace_gpu_mem_total(meta->device,
+				-(meta->entry->memdesc.size));
 	}
 	spin_unlock(&kgsl_dmabuf_lock);
 }
@@ -299,9 +306,6 @@ static void kgsl_destroy_ion(struct kgsl_memdesc *memdesc)
 	struct kgsl_mem_entry *entry = container_of(memdesc,
 				struct kgsl_mem_entry, memdesc);
 	struct kgsl_dma_buf_meta *meta = entry->priv_data;
-
-	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
-		return;
 
 	if (meta != NULL) {
 		remove_dmabuf_list(meta);
@@ -331,9 +335,6 @@ static void kgsl_destroy_anon(struct kgsl_memdesc *memdesc)
 	struct scatterlist *sg;
 	struct page *page;
 
-	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
-		return;
-
 	for_each_sg(memdesc->sgt->sgl, sg, memdesc->sgt->nents, i) {
 		page = sg_page(sg);
 		for (j = 0; j < (sg->length >> PAGE_SHIFT); j++) {
@@ -356,6 +357,9 @@ static void kgsl_destroy_anon(struct kgsl_memdesc *memdesc)
 static void mem_entry_destroy(struct kgsl_mem_entry *entry)
 {
 	unsigned int memtype;
+
+	if (entry == NULL)
+		return;
 
 	/* pull out the memtype before the flags get cleared */
 	memtype = kgsl_memdesc_usermem_type(&entry->memdesc);
@@ -568,6 +572,21 @@ static int _kgsl_get_context_id(struct kgsl_device *device)
 	return id;
 }
 
+void kgsl_dump_active_contexts(struct kgsl_device *device)
+{
+	struct kgsl_context *tmp_context;
+	int tmp_id;
+
+	read_lock(&device->context_lock);
+	idr_for_each_entry (&device->context_idr, tmp_context, tmp_id) {
+		dev_warn(device->dev, "process %s pid %d created %d contexts",
+				tmp_context->proc_priv->comm,
+				tmp_context->proc_priv->pid,
+				tmp_context->proc_priv->ctxt_count);
+	}
+	read_unlock(&device->context_lock);
+}
+
 /**
  * kgsl_context_init() - helper to initialize kgsl_context members
  * @dev_priv: the owner of the context
@@ -595,8 +614,8 @@ int kgsl_context_init(struct kgsl_device_private *dev_priv,
 	spin_lock(&proc_priv->ctxt_count_lock);
 	if (atomic_read(&proc_priv->ctxt_count) > KGSL_MAX_CONTEXTS_PER_PROC) {
 		dev_err(device->dev,
-			     "Per process context limit reached for pid %u\n",
-			     pid_nr(dev_priv->process_priv->pid));
+				"Per process context limit reached for pid %u\n",
+				pid_nr(dev_priv->process_priv->pid));
 		spin_unlock(&proc_priv->ctxt_count_lock);
 		return -ENOSPC;
 	}
@@ -617,10 +636,12 @@ int kgsl_context_init(struct kgsl_device_private *dev_priv,
 	}
 
 	if (id < 0) {
-		if (id == -ENOSPC)
+		if (id == -ENOSPC) {
 			dev_warn(device->dev,
-				      "cannot have more than %zu contexts due to memstore limitation\n",
-				      KGSL_MEMSTORE_MAX);
+					"cannot have more than %zu contexts due to memstore limitation\n",
+					KGSL_MEMSTORE_MAX);
+			kgsl_dump_active_contexts(device);
+		}
 		atomic_dec(&proc_priv->ctxt_count);
 		return id;
 	}
@@ -854,12 +875,38 @@ static int kgsl_suspend(struct device *dev)
 	pm_message_t arg = {0};
 	struct kgsl_device *device = dev_get_drvdata(dev);
 
+	/*
+	 * Hacking the gmu and kgsl-iommu devices to force probing caused an
+	 * issue with suspend/resume. Need to silently succeed for these devices
+	 * since suspend/resume is handled by the main kgsl device.
+	 */
+	if (dev->of_node && dev->of_node->name) {
+		if (!strcmp(dev->of_node->name, "qcom,gmu") ||
+		     !strcmp(dev->of_node->name, "qcom,kgsl-iommu")) {
+			pr_debug("kgsl: suspend is handled by kgsl device\n");
+			return 0;
+		}
+	}
+
 	return kgsl_suspend_device(device, arg);
 }
 
 static int kgsl_resume(struct device *dev)
 {
 	struct kgsl_device *device = dev_get_drvdata(dev);
+
+	/*
+	 * Hacking the gmu and kgsl-iommu devices to force probing caused an
+	 * issue with suspend/resume. Need to silently succeed for these devices
+	 * since suspend/resume is handled by the main kgsl device.
+	 */
+	if (dev->of_node && dev->of_node->name) {
+		if (!strcmp(dev->of_node->name, "qcom,gmu") ||
+		     !strcmp(dev->of_node->name, "qcom,kgsl-iommu")) {
+			pr_debug("kgsl: resume is handled by kgsl device\n");
+			return 0;
+		}
+	}
 
 	return kgsl_resume_device(device);
 }
@@ -1015,7 +1062,7 @@ static struct kgsl_process_private *kgsl_process_private_new(
 
 	/* Allocate a pagetable for the new process object */
 	private->pagetable = kgsl_mmu_getpagetable(&device->mmu,
-							pid_nr(cur_pid));
+				pid_nr(cur_pid));
 	if (IS_ERR(private->pagetable)) {
 		int err = PTR_ERR(private->pagetable);
 
@@ -2135,10 +2182,6 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 	if (!(param->flags & KGSL_GPU_AUX_COMMAND_TIMELINE))
 		return -EINVAL;
 
-	if ((param->flags & KGSL_GPU_AUX_COMMAND_SYNC) &&
-		(param->numsyncs > KGSL_MAX_SYNCPOINTS))
-		return -EINVAL;
-
 	context = kgsl_context_get_owner(dev_priv, param->context_id);
 	if (!context)
 		return -EINVAL;
@@ -3099,6 +3142,7 @@ static int kgsl_setup_dma_buf(struct kgsl_device *device,
 	if (entry->memdesc.flags & KGSL_MEMFLAGS_IOCOHERENT)
 		attach->dma_map_attrs |= DMA_ATTR_SKIP_CPU_SYNC;
 
+	meta->device = device;
 	meta->dmabuf = dmabuf;
 	meta->attach = attach;
 	meta->entry = entry;
@@ -5370,15 +5414,20 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 		goto error_close_mmu;
 
 	/* Allocate memory for dma_parms and set the max_seg_size */
-	device->dev->dma_parms =
-		kzalloc(sizeof(*device->dev->dma_parms), GFP_KERNEL);
-
+	if (!device->dev->dma_parms) {
+		device->dev->dma_parms =
+			kzalloc(sizeof(*device->dev->dma_parms), GFP_KERNEL);
+		if (!device->dev->dma_parms) {
+			status = -ENOMEM;
+			goto error_close_mmu;
+		}
+	}
 	dma_set_max_seg_size(device->dev, KGSL_DMA_BIT_MASK);
 
 	/* Initialize the memory pools */
-	kgsl_init_page_pools(device);
+	kgsl_init_page_pools(device->pdev);
 
-	status = kgsl_reclaim_init(device);
+	status = kgsl_reclaim_init();
 	if (status)
 		goto error_close_mmu;
 
@@ -5476,7 +5525,7 @@ _flush_mem_workqueue(struct work_struct *work)
 	flush_workqueue(kgsl_driver.mem_workqueue);
 }
 
-static void kgsl_core_exit(void)
+void kgsl_core_exit(void)
 {
 	kgsl_events_exit();
 	kgsl_core_debugfs_close();
@@ -5508,7 +5557,7 @@ static void kgsl_core_exit(void)
 		ARRAY_SIZE(kgsl_driver.devp));
 }
 
-static int __init kgsl_core_init(void)
+int __init kgsl_core_init(void)
 {
 	int result = 0;
 	struct sched_param param = { .sched_priority = 2 };
@@ -5554,6 +5603,9 @@ static int __init kgsl_core_init(void)
 		pr_err("kgsl: driver_register failed\n");
 		goto err;
 	}
+
+	msm_adreno_tz_notifiers.add = kgsl_devfreq_add_notifier;
+	msm_adreno_tz_notifiers.delete = kgsl_devfreq_del_notifier;
 
 	/* Make kobjects in the virtual device for storing statistics */
 
@@ -5608,9 +5660,3 @@ err:
 	kgsl_core_exit();
 	return result;
 }
-
-module_init(kgsl_core_init);
-module_exit(kgsl_core_exit);
-
-MODULE_DESCRIPTION("MSM GPU driver");
-MODULE_LICENSE("GPL v2");

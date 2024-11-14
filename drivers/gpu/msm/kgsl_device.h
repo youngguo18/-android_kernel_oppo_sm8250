@@ -8,6 +8,7 @@
 
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
+#include <trace/events/gpu_mem.h>
 
 #include "kgsl.h"
 #include "kgsl_drawobj.h"
@@ -50,10 +51,8 @@ enum kgsl_event_results {
 	KGSL_EVENT_CANCELLED = 2,
 };
 
-#define KGSL_FLAG_WAKE_ON_TOUCH   BIT(0)
-#define KGSL_FLAG_SPARSE          BIT(1)
-#define KGSL_FLAG_USE_SHMEM       BIT(2)
-#define KGSL_FLAG_PROCESS_RECLAIM BIT(3)
+#define KGSL_FLAG_WAKE_ON_TOUCH BIT(0)
+#define KGSL_FLAG_SPARSE        BIT(1)
 
 /*
  * "list" of event types for ftrace symbolic magic
@@ -278,6 +277,7 @@ struct kgsl_device {
 	uint32_t requested_state;
 
 	atomic_t active_cnt;
+	atomic64_t total_mapped;
 
 	wait_queue_head_t wait_queue;
 	wait_queue_head_t active_cnt_wq;
@@ -740,6 +740,10 @@ long kgsl_ioctl_copy_out(unsigned int kernel_cmd, unsigned int user_cmd,
 void kgsl_sparse_bind(struct kgsl_process_private *private,
 		struct kgsl_drawobj_sparse *sparse);
 
+
+int kgsl_core_init(void);
+void kgsl_core_exit(void);
+
 /**
  * kgsl_context_put() - Release context reference count
  * @context: Pointer to the KGSL context to be released
@@ -1005,5 +1009,29 @@ struct kgsl_pwr_limit {
 	unsigned int level;
 	struct kgsl_device *device;
 };
+
+/**
+ * kgsl_trace_gpu_mem_total - Overall gpu memory usage tracking which includes
+ * process allocations, imported dmabufs and kgsl globals
+ * @device: A KGSL device handle
+ * @delta: delta of total mapped memory size
+ */
+#ifdef CONFIG_TRACE_GPU_MEM
+static inline void kgsl_trace_gpu_mem_total(struct kgsl_device *device,
+						s64 delta)
+{
+	u64 total_size;
+
+	if (!device)
+		return;
+
+	total_size = atomic64_add_return(delta, &device->total_mapped);
+
+	trace_gpu_mem_total(0, 0, total_size);
+}
+#else
+static inline void kgsl_trace_gpu_mem_total(struct kgsl_device *device,
+						s64 delta) {}
+#endif
 
 #endif  /* __KGSL_DEVICE_H */

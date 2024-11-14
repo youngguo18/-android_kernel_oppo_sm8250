@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2002,2007-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <asm/cacheflush.h>
@@ -277,16 +277,18 @@ static struct kobj_type process_ktype = {
 static struct mem_entry_stats mem_stats[] = {
 	MEM_ENTRY_STAT(KGSL_MEM_ENTRY_KERNEL, kernel),
 	MEM_ENTRY_STAT(KGSL_MEM_ENTRY_USER, user),
-#ifdef CONFIG_ION
+#if IS_ENABLED(CONFIG_ION)
 	MEM_ENTRY_STAT(KGSL_MEM_ENTRY_ION, ion),
 #endif
 };
 
+#ifdef CONFIG_QCOM_KGSL_PROCESS_RECLAIM
 static struct device_attribute dev_attr_max_reclaim_limit = {
 	.attr = { .name = "max_reclaim_limit", .mode = 0644 },
 	.show = kgsl_proc_max_reclaim_limit_show,
 	.store = kgsl_proc_max_reclaim_limit_store,
 };
+#endif
 
 void
 kgsl_process_uninit_sysfs(struct kgsl_process_private *private)
@@ -416,7 +418,9 @@ static const struct attribute *drv_attr_list[] = {
 	&dev_attr_mapped.attr,
 	&dev_attr_mapped_max.attr,
 	&dev_attr_full_cache_threshold.attr,
+#ifdef CONFIG_QCOM_KGSL_PROCESS_RECLAIM
 	&dev_attr_max_reclaim_limit.attr,
+#endif
 	NULL,
 };
 
@@ -595,9 +599,6 @@ static int kgsl_unlock_sgt(struct sg_table *sgt)
 
 static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 {
-	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
-		return;
-
 	kgsl_page_alloc_unmap_kernel(memdesc);
 	/* we certainly do not expect the hostptr to still be mapped */
 	BUG_ON(memdesc->hostptr);
@@ -697,9 +698,6 @@ static int kgsl_contiguous_vmfault(struct kgsl_memdesc *memdesc,
 static void kgsl_cma_coherent_free(struct kgsl_memdesc *memdesc)
 {
 	unsigned long attrs = 0;
-
-	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
-		return;
 
 	if (memdesc->hostptr) {
 		if (memdesc->priv & KGSL_MEMDESC_SECURE) {
@@ -924,9 +922,6 @@ void kgsl_memdesc_init(struct kgsl_device *device,
 	if (flags & KGSL_MEMFLAGS_SECURE)
 		memdesc->priv |= KGSL_MEMDESC_SECURE;
 
-	if (device->flags & KGSL_FLAG_USE_SHMEM)
-		memdesc->priv |= KGSL_MEMDESC_USE_SHMEM;
-
 	memdesc->flags = flags;
 	memdesc->dev = device->dev->parent;
 
@@ -938,7 +933,9 @@ void kgsl_memdesc_init(struct kgsl_device *device,
 	spin_lock_init(&memdesc->gpuaddr_lock);
 }
 
-static int kgsl_shmem_alloc_page(struct page **pages,
+#ifdef CONFIG_QCOM_KGSL_USE_SHMEM
+static int kgsl_alloc_page(int *page_size, struct page **pages,
+			unsigned int pages_len, unsigned int *align,
 			struct file *shmem_filp, unsigned int page_off)
 {
 	struct page *page;
@@ -958,7 +955,7 @@ static int kgsl_shmem_alloc_page(struct page **pages,
 	return 1;
 }
 
-void kgsl_shmem_free_pages(struct kgsl_memdesc *memdesc)
+void kgsl_free_pages(struct kgsl_memdesc *memdesc)
 {
 	int i;
 
@@ -967,53 +964,51 @@ void kgsl_shmem_free_pages(struct kgsl_memdesc *memdesc)
 			put_page(memdesc->pages[i]);
 }
 
+static void kgsl_free_page(struct page *p)
+{
+	put_page(p);
+}
+
 static int kgsl_memdesc_file_setup(struct kgsl_memdesc *memdesc, uint64_t size)
 {
 	int ret;
 
-	if (memdesc->priv & KGSL_MEMDESC_USE_SHMEM) {
-		memdesc->shmem_filp = shmem_file_setup("kgsl-3d0", size,
-				VM_NORESERVE);
-		if (IS_ERR(memdesc->shmem_filp)) {
-			ret = PTR_ERR(memdesc->shmem_filp);
-			pr_err("kgsl: unable to setup shmem file err %d\n",
-					ret);
-			memdesc->shmem_filp = NULL;
-			return ret;
-		}
-		mapping_set_unevictable(memdesc->shmem_filp->f_mapping);
+	memdesc->shmem_filp = shmem_file_setup("kgsl-3d0", size,
+			VM_NORESERVE);
+	if (IS_ERR(memdesc->shmem_filp)) {
+		ret = PTR_ERR(memdesc->shmem_filp);
+		pr_err("kgsl: unable to setup shmem file err %d\n",
+				ret);
+		memdesc->shmem_filp = NULL;
+		return ret;
 	}
+	mapping_set_unevictable(memdesc->shmem_filp->f_mapping);
 
 	return 0;
 }
-
+#else
 static int kgsl_alloc_page(int *page_size, struct page **pages,
 			unsigned int pages_len, unsigned int *align,
-			struct kgsl_memdesc *memdesc, unsigned int page_off)
+			struct file *shmem_filp, unsigned int page_off)
 {
-	if (memdesc->priv & KGSL_MEMDESC_USE_SHMEM)
-		return kgsl_shmem_alloc_page(pages, memdesc->shmem_filp,
-						page_off);
-
-	return kgsl_pool_alloc_page(page_size, pages, pages_len, align,
-					memdesc);
+	return kgsl_pool_alloc_page(page_size, pages, pages_len, align);
 }
 
 void kgsl_free_pages(struct kgsl_memdesc *memdesc)
 {
-	if (memdesc->priv & KGSL_MEMDESC_USE_SHMEM)
-		kgsl_shmem_free_pages(memdesc);
-	else
-		kgsl_pool_free_pages(memdesc->pages, memdesc->page_count);
+	kgsl_pool_free_pages(memdesc->pages, memdesc->page_count);
 }
 
-static void kgsl_free_page(struct kgsl_memdesc *memdesc, struct page *p)
+static void kgsl_free_page(struct page *p)
 {
-	if (memdesc->priv & KGSL_MEMDESC_USE_SHMEM)
-		put_page(p);
-	else
-		kgsl_pool_free_page(p);
+	kgsl_pool_free_page(p);
 }
+
+static int kgsl_memdesc_file_setup(struct kgsl_memdesc *memdesc, uint64_t size)
+{
+	return 0;
+}
+#endif
 
 void kgsl_free_pages_from_sgt(struct kgsl_memdesc *memdesc)
 {
@@ -1035,7 +1030,7 @@ void kgsl_free_pages_from_sgt(struct kgsl_memdesc *memdesc)
 		while (j < (sg->length/PAGE_SIZE)) {
 			count = 1 << compound_order(p);
 			next = nth_page(p, count);
-			kgsl_free_page(memdesc, p);
+			kgsl_free_page(p);
 
 			p = next;
 			j += count;
@@ -1076,7 +1071,7 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 	if (align < ilog2(SZ_1M))
 		align = ilog2(SZ_1M);
 
-	page_size = kgsl_get_page_size(size, align, memdesc);
+	page_size = kgsl_get_page_size(size, align);
 
 	/*
 	 * The alignment cannot be less than the intended page size - it can be
@@ -1127,7 +1122,7 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 		page_count = kgsl_alloc_page(&page_size,
 					memdesc->pages + pcount,
 					len_alloc - pcount,
-					&align, memdesc, pcount);
+					&align, memdesc->shmem_filp, pcount);
 		if (page_count <= 0) {
 			if (page_count == -EAGAIN)
 				continue;
@@ -1161,7 +1156,7 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 		memdesc->page_count += page_count;
 
 		/* Get the needed page size for the next iteration */
-		page_size = kgsl_get_page_size(len, align, memdesc);
+		page_size = kgsl_get_page_size(len, align);
 	}
 
 	/* Call to the hypervisor to lock any secure buffer allocations */
@@ -1222,7 +1217,7 @@ done:
 
 			for (j = 0; j < pcount; j += count) {
 				count = 1 << compound_order(memdesc->pages[j]);
-				kgsl_free_page(memdesc, memdesc->pages[j]);
+				kgsl_free_page(memdesc->pages[j]);
 			}
 		}
 

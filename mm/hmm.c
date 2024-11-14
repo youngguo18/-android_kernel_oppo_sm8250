@@ -1005,6 +1005,7 @@ static void hmm_devmem_release(void *data)
 	npages = ALIGN(resource_size(resource), PA_SECTION_SIZE) >> PAGE_SHIFT;
 
 	page = pfn_to_page(start_pfn);
+	zone = page_zone(page);
 	nid = page_to_nid(page);
 
 	mem_hotplug_begin();

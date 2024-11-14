@@ -78,7 +78,7 @@ _kgsl_pool_add_page(struct kgsl_page_pool *pool, struct page *p)
 	pool->page_count++;
 	spin_unlock(&pool->list_lock);
 	mod_node_page_state(page_pgdat(p), NR_KERNEL_MISC_RECLAIMABLE,
-			    (1 << pool->pool_order));
+				(1 << pool->pool_order));
 }
 
 /* Returns a page from specified pool */
@@ -96,9 +96,8 @@ _kgsl_pool_get_page(struct kgsl_page_pool *pool)
 	spin_unlock(&pool->list_lock);
 
 	if (p != NULL)
-		mod_node_page_state(page_pgdat(p),
-				    NR_KERNEL_MISC_RECLAIMABLE,
-				    -(1 << pool->pool_order));
+		mod_node_page_state(page_pgdat(p), NR_KERNEL_MISC_RECLAIMABLE,
+				-(1 << pool->pool_order));
 
 	return p;
 }
@@ -127,6 +126,23 @@ static int kgsl_pool_size_total(void)
 	return total;
 }
 
+static struct page *_kgsl_alloc_pages(int order)
+{
+	gfp_t gfp_mask = kgsl_gfp_mask(order);
+	struct page *page = alloc_pages(gfp_mask, order);
+
+	if (page)
+		mod_node_page_state(page_pgdat(page), NR_GPU_HEAP, 1 << order);
+
+	return page;
+}
+
+static void _kgsl_free_pages(struct page *page, int order)
+{
+	mod_node_page_state(page_pgdat(page), NR_GPU_HEAP, -(1 << order));
+	__free_pages(page, order);
+}
+
 /*
  * This will shrink the specified pool by num_pages or its pool_size,
  * whichever is smaller.
@@ -144,7 +160,7 @@ _kgsl_pool_shrink(struct kgsl_page_pool *pool, int num_pages)
 		struct page *page = _kgsl_pool_get_page(pool);
 
 		if (page != NULL) {
-			__free_pages(page, pool->pool_order);
+			_kgsl_free_pages(page, pool->pool_order);
 			pcount += (1 << pool->pool_order);
 		} else {
 			/* Break as this pool is empty */
@@ -265,8 +281,7 @@ static int kgsl_pool_get_retry_order(unsigned int order)
  * Return total page count on success and negative value on failure
  */
 int kgsl_pool_alloc_page(int *page_size, struct page **pages,
-			unsigned int pages_len, unsigned int *align,
-			struct kgsl_memdesc *memdesc)
+			unsigned int pages_len, unsigned int *align)
 {
 	int j;
 	int pcount = 0;
@@ -282,9 +297,7 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 
 	/* If the pool is not configured get pages from the system */
 	if (!kgsl_num_pools) {
-		gfp_t gfp_mask = kgsl_gfp_mask(order);
-
-		page = alloc_pages(gfp_mask, order);
+		page = _kgsl_alloc_pages(order);
 		if (page == NULL) {
 			/* Retry with lower order pages */
 			if (order > 0) {
@@ -309,9 +322,7 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 			 * Fall back to direct allocation in case
 			 * pool with zero order is not present
 			 */
-			gfp_t gfp_mask = kgsl_gfp_mask(order);
-
-			page = alloc_pages(gfp_mask, order);
+			page = _kgsl_alloc_pages(order);
 			if (page == NULL)
 				return -ENOMEM;
 			kgsl_zero_page(page, order);
@@ -324,8 +335,6 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 
 	/* Allocate a new page if not allocated from pool */
 	if (page == NULL) {
-		gfp_t gfp_mask = kgsl_gfp_mask(order);
-
 		/* Only allocate non-reserved memory for certain pools */
 		if (!pool->allocation_allowed && pool_idx > 0) {
 			size = PAGE_SIZE <<
@@ -333,8 +342,7 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 			goto eagain;
 		}
 
-		page = alloc_pages(gfp_mask, order);
-
+		page = _kgsl_alloc_pages(order);
 		if (!page) {
 			if (pool_idx > 0) {
 				/* Retry with lower order pages */
@@ -361,7 +369,7 @@ done:
 
 eagain:
 	*page_size = kgsl_get_page_size(size,
-			ilog2(size), memdesc);
+			ilog2(size));
 	*align = ilog2(*page_size);
 	return -EAGAIN;
 }
@@ -389,7 +397,7 @@ void kgsl_pool_free_page(struct page *page)
 	}
 
 	/* Give back to system as not added to pool */
-	__free_pages(page, page_order);
+	_kgsl_free_pages(page, page_order);
 }
 
 /*
@@ -422,9 +430,7 @@ static void kgsl_pool_reserve_pages(void)
 				kgsl_pools[i].reserved_pages);
 		for (j = 0; j < page_count; j++) {
 			int order = kgsl_pools[i].pool_order;
-			gfp_t gfp_mask = kgsl_gfp_mask(order);
-
-			page = alloc_pages(gfp_mask, order);
+			page = _kgsl_alloc_pages(order);
 			if (page != NULL)
 				_kgsl_pool_add_page(&kgsl_pools[i], page);
 		}
@@ -548,13 +554,11 @@ static void kgsl_of_get_mempools(struct device_node *parent)
 	}
 }
 
-void kgsl_init_page_pools(struct kgsl_device *device)
+void kgsl_init_page_pools(struct platform_device *pdev)
 {
-	if (device->flags & KGSL_FLAG_USE_SHMEM)
-		return;
 
 	/* Get GPU mempools data and configure pools */
-	kgsl_of_get_mempools(device->pdev->dev.of_node);
+	kgsl_of_get_mempools(pdev->dev.of_node);
 
 	/* Reserve the appropriate number of pages for each pool */
 	kgsl_pool_reserve_pages();
