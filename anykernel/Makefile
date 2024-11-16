@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2022 LibXZR <i@xzr.moe>. All Rights Reserved.
 
-NAME := Perf-Kernel$(LOCALVERSION).zip
+NAME := kona_young-Kernel$(LOCALVERSION).zip
 
 always += all
 ALL := $(obj)/all
