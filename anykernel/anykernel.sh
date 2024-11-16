@@ -4,7 +4,7 @@
 ### AnyKernel setup
 # begin properties
 properties() { '
-kernel.string=perf kernel by SID (Siddhant221  @ xda-developers)
+kernel.string=kona kernel by youngguo and ApexLegend007  from SID (Siddhant221  @ xda-developers)
 do.devicecheck=0
 do.modules=0
 do.systemless=0
