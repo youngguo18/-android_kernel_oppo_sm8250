@@ -21,9 +21,11 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/devfreq.h>
-#include <trace/events/power.h>
 #include "governor.h"
 #include "governor_bw_hwmon.h"
+
+#define CREATE_TRACE_POINTS
+#include "governor_bw_hwmon_trace.h"
 
 #define NUM_MBPS_ZONES		10
 struct hwmon_node {
@@ -290,6 +292,7 @@ int bw_hwmon_sample_end(struct bw_hwmon *hwmon)
 
 	return wake;
 }
+EXPORT_SYMBOL_GPL(bw_hwmon_sample_end);
 
 unsigned long to_mbps_zone(struct hwmon_node *node, unsigned long mbps)
 {
@@ -531,6 +534,7 @@ int update_bw_hwmon(struct bw_hwmon *hwmon)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(update_bw_hwmon);
 
 static int start_monitor(struct devfreq *df, bool init)
 {
@@ -1017,6 +1021,7 @@ int register_bw_hwmon(struct device *dev, struct bw_hwmon *hwmon)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(register_bw_hwmon);
 
 MODULE_DESCRIPTION("HW monitor based dev DDR bandwidth voting driver");
 MODULE_LICENSE("GPL v2");

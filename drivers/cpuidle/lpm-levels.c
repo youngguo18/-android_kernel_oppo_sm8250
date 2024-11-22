@@ -43,6 +43,7 @@
 #include "../clk/clk.h"
 #define CREATE_TRACE_POINTS
 #include <trace/events/trace_msm_low_power.h>
+#include <linux/gpio.h>
 
 #define SCLK_HZ (32768)
 #define PSCI_POWER_STATE(reset) (reset << 30)
@@ -145,6 +146,7 @@ uint32_t register_system_pm_ops(struct system_pm_ops *pm_ops)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(register_system_pm_ops);
 
 static uint32_t least_cluster_latency(struct lpm_cluster *cluster,
 					struct latency_level *lat_level)
@@ -1381,6 +1383,13 @@ static bool psci_enter_sleep(struct lpm_cpu *cpu, int idx, bool from_idle)
 			0xdeaffeed, 0xdeaffeed, from_idle);
 	stop_critical_timings();
 
+#ifdef CONFIG_DEBUG_FS
+	if (!from_idle && pm_gpio_debug_mask) {
+		msm_gpio_dump(NULL);
+		pmic_gpio_dump(NULL);
+	}
+#endif
+
 	success = !arm_cpuidle_suspend(state_id);
 
 	start_critical_timings();
@@ -1648,8 +1657,6 @@ static int __init init_lpm(void)
 	return cpuidle_register_governor(&lpm_governor);
 }
 
-postcore_initcall(init_lpm);
-
 static void register_cpu_lpm_stats(struct lpm_cpu *cpu,
 		struct lpm_cluster *parent)
 {
@@ -1745,8 +1752,10 @@ static int lpm_suspend_enter(suspend_state_t state)
 	 * which resources are enabled and preventing the system level
 	 * LPMs (XO and Vmin).
 	 */
+#ifdef CONFIG_DEBUG_FS
 	clock_debug_print_enabled();
 	regulator_debug_print_enabled();
+#endif
 
 	cpu_prepare(lpm_cpu, idx, false);
 	cluster_prepare(cluster, cpumask, idx, false, 0);
@@ -1876,10 +1885,15 @@ static struct platform_driver lpm_driver = {
 static int __init lpm_levels_module_init(void)
 {
 	int rc;
+	int cpu __maybe_unused;
+
+#ifdef MODULE
+	rc = init_lpm();
+	if (rc)
+		return rc;
+#endif
 
 #ifdef CONFIG_ARM
-	int cpu;
-
 	for_each_possible_cpu(cpu) {
 		rc = arm_cpuidle_init(cpu);
 		if (rc) {
@@ -1894,6 +1908,17 @@ static int __init lpm_levels_module_init(void)
 		pr_info("Error registering %s rc=%d\n", lpm_driver.driver.name,
 									rc);
 
+	if (!rc)
+		set_update_ipi_history_callback(update_ipi_history);
+
 	return rc;
 }
+
+#ifndef MODULE
+postcore_initcall(init_lpm);
+#endif
+
 late_initcall(lpm_levels_module_init);
+
+MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("Qualcomm Technologies, Inc. (QTI) Power Management Drivers");
