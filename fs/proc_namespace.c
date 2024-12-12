@@ -146,12 +146,8 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	if (unlikely(r->mnt.mnt_root->d_inode->i_state & 33554432))
 		return 0;
-	if (likely(r->mnt.android_kabi_reserved1)) { // if it has fake_mnt_id, then its mnt_id and parent_mnt_id must be spoofed
-		seq_printf(m, "%i %i %u:%u ", r->mnt.android_kabi_reserved1, r->mnt_parent->mnt.android_kabi_reserved1,
-					MAJOR(sb->s_dev), MINOR(sb->s_dev));
-		goto bypass_orig_flow;
-	}
 #endif
+
 	seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,
 		   MAJOR(sb->s_dev), MINOR(sb->s_dev));
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
